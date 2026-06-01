@@ -1,5 +1,9 @@
 # Lint Sweep
 
+![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
+
+**Created by [@alanshurafa](https://github.com/alanshurafa)**
+
 > Bounded weekly audit that scans your brain for orphans, contradictions, stale facts, and low-signal noise — then writes a human-reviewable markdown report. Never mutates thoughts.
 
 ## What It Does
