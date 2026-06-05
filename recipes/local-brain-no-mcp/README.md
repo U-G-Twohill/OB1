@@ -1,5 +1,9 @@
 # Local Brain (No MCP)
 
+![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
+
+**Created by [@dhanjit](https://github.com/dhanjit)**
+
 Self-hosted Open Brain on a single LAN host: the official Supabase docker-compose stack plus an Ollama sidecar for local embeddings and two Edge Functions (`capture`, `search`) wired up for OB1's `thoughts` schema. Reached from each dev host through `curl`, via the companion [`ob1-local-http`](../../skills/ob1-local-http/) skill -- no MCP transport involved.
 
 ## Why this exists (deliberate exception to canonical OB1)

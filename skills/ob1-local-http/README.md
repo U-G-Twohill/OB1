@@ -1,5 +1,9 @@
 # OB1 Local HTTP
 
+![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
+
+**Created by [@dhanjit](https://github.com/dhanjit)**
+
 Skill pack that lets Claude Code (or any skill-aware AI coding tool) capture and search thoughts against a self-hosted Open Brain over plain HTTPS, with no MCP transport involved. Pairs with the [`local-brain-no-mcp`](../../recipes/local-brain-no-mcp/) recipe.
 
 ## What it does
