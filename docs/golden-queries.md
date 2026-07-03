@@ -24,4 +24,14 @@
 
 **Lesson from #10 — semantic search still rewards vocabulary overlap.** "What went wrong with X" is abstract; the source talks concretely about "usage budget," "Fable," "fan-out," "session limits." When a query returns nothing convincing, try re-phrasing toward the domain's own words before concluding the content is missing — this is now noted in the maintenance playbook.
 
+---
+
+## Update 2026-07-03 — default search threshold was too strict, now fixed
+
+**Real-world multi-surface testing found a genuine defect this initial verification pass missed.** My own golden-query run above used an explicit `threshold: 0.3` in the test script — I never actually exercised the *default* a client gets when it calls `search_thoughts` with no threshold argument, which was `0.5`. Uriah's live test across Claude.ai browser and laptop Claude Code (both calling with no explicit threshold) surfaced this immediately: 2 of 3 test questions returned "no thoughts found" on the laptop, and Claude.ai only got 3/3 after manually retrying at threshold 0.05. The best matches for this corpus routinely land in the 24–48% band (short, dense digests rather than long documents), well under the 0.5 default cutoff — so out-of-the-box search felt broken even though the content was all there and correct.
+
+**Fix applied 2026-07-03:** changed both hardcoded thresholds in the deployed Edge Function (`search_thoughts`'s default, and the ChatGPT-compat `search` tool's hardcoded value) from `0.5` to `0.3`, redeployed. Re-verified with no explicit threshold: all three previously-failing/inconsistent questions now return the correct top result on the first call (Ben's Trees ~42%, harvest rule ~48%, PSC ticketing ~69%). No client-side workaround needed anymore.
+
+**Lesson for future digest-writing:** this corpus's embeddings score lower on average than a typical "well-written prose article" corpus OB1 was probably tuned against, likely because the digests are dense/list-like rather than narrative. If future entries keep landing under 30% even for clearly-relevant matches, consider whether digests need more natural-language framing (full sentences over compressed fact-lists) rather than lowering the threshold further.
+
 **How to re-run:** `curl` or any connected client, `search_thoughts` tool, query = the question text verbatim, default threshold (0.5) or lower to 0.3 if nothing returns. Update the Result column and the run-log date each time.

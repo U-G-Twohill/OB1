@@ -73,6 +73,7 @@ Folded into habits you already have, not a new ritual:
 - **Sync script errors on one entry but not others:** it's designed to continue past failures and report a summary at the end (`N ok, N failed`) — check the specific error message, usually an OpenRouter rate limit or a malformed manifest entry, not a systemic issue.
 - **Search returns nothing for a query that should have an answer:** try rephrasing toward the source content's own vocabulary before assuming the content is missing — semantic search still rewards word overlap, not just meaning overlap (see golden-query #10 in `docs/golden-queries.md` for a worked example).
 - **General OB1 issues** (deploy failures, Edge Function errors unrelated to this sync tooling): check the upstream `NateBJones-Projects/OB1` repo's own FAQ/troubleshooting doc first — this playbook only covers what's specific to Uriah's setup and the sync tooling built on top of it.
+- **"No thoughts found" on a query you're sure should hit something:** fixed 2026-07-03 (the deployed `search_thoughts`/`search` tools' default similarity threshold was 0.5, too strict for this corpus where good matches often land 24–48%; both were lowered to 0.3 and redeployed — real-world multi-surface testing caught this, not the original verification pass). If it resurfaces after a future redeploy of `open-brain-mcp/index.ts` from a fresh clone of the upstream OB1 repo, re-check both threshold defaults (`search_thoughts`'s Zod schema default and the ChatGPT-compat `search` tool's hardcoded `match_threshold`) haven't reverted to `0.5`.
 
 ---
 
