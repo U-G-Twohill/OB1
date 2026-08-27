@@ -39,16 +39,36 @@ export const GLOBAL_EXCLUDES = [
   /[\\/]textbook-extract[\\/]/,
   /[\\/]\.git[\\/]/,
   /[\\/]dist[\\/]/,
+  /[\\/]build[\\/]/,
   /[\\/]__pycache__[\\/]/,
+  // Python virtualenvs. Nelson BI's .venv holds a single 5.75 MB ATTRIBUTION.md —
+  // 93% of that repo's markdown by weight, and none of it is Uriah's.
+  /[\\/]\.venv[\\/]/,
+  /[\\/]venv[\\/]/,
+  /[\\/]site-packages[\\/]/,
+  // Stale agent worktrees. Ben's Trees carries 531 .md inside .claude/worktrees —
+  // three full checkouts left by March agent sessions. Indexing them would triple-
+  // count that repo and surface superseded copies as if they were current.
+  /[\\/]\.claude[\\/]worktrees[\\/]/,
+  /[\\/]worktrees[\\/]/,
+  /[\\/]\.next[\\/]/,
+  /[\\/]vendor[\\/]/,
 ];
 
 // Claude Code memory directories that must NOT be indexed, by project-dir name.
-//   - Command Center's is already covered by curated `memory-*` entries in manifest.mjs.
-//   - Whetstone is excluded by decision (ADR 0007): it holds unfiltered personal
-//     political reasoning and must never surface into a session working on client work.
-//     It has no memory dir today; this entry is a standing guard for when it does.
+//
+// Whetstone is excluded by decision (ADR 0007): it holds unfiltered personal political
+// reasoning and must never surface into a session working on client work. It has no
+// memory directory today — these are standing guards for when it gets one.
+//
+// Command Center's memory dir is deliberately NOT excluded, even though its 33 files
+// have curated digests. The rule scans it too and the path-dedupe leaves those 33 to
+// their digests, so the only thing the rule actually picks up is a NEW memory file
+// nobody has written an entry for yet. That gap is not hypothetical: a concurrent
+// session added `project_wordpress_local_dev_want.md` during this very sync, and
+// --verify flagged it as UNLISTED. Covering it by rule means a new memory is indexed
+// the moment it exists, and can be promoted to a curated digest later if it earns one.
 export const MEMORY_DIR_EXCLUDES = new Set([
-  "D--Repos-Command-Center-Plan",
   "D--Repos-Whetstone",
   "D--Websites-Whetstone",
 ]);
@@ -90,6 +110,44 @@ export const sources = [
     tags: ["command-center", "workspace"],
     note: "HARVEST.md, README.md, shell-aliases.md. CLAUDE.md / status.md / SESSION-SUMMARY.md are curated and dedupe out.",
   },
+  // --- Project repos ------------------------------------------------------
+  //
+  // Added 2026-08-27. Until then only each repo's CLAUDE.md was digested, so the
+  // actual work — plans, STATE docs, harvest logs, design notes — was invisible from
+  // the laptop and from claude.ai, which is precisely where it is needed, because
+  // neither has a local checkout.
+  //
+  // Client repos were deferred in the original migration on two stated conditions:
+  // that the sync tool had a track record, and that each repo's state had settled.
+  // Both now hold. A privacy scan across all three (2026-08-27) found no live keys,
+  // no customer records, and no third-party personal data — the only email address
+  // in PSC's markdown is Uriah's own, and every `attendee` / `INSERT INTO` match was
+  // a feature description ("Attendees — CSV + print door list"), not data. That is
+  // the playbook's rule holding: describe the process, never the data.
+  //
+  // If a repo ever starts holding real customer records in markdown, remove it here.
+  ...[
+    { key: "psc", dir: "D:/Websites/Public Service Center", tags: ["psc", "client", "ticketing"] },
+    { key: "bens-trees", dir: "D:/Websites/Ben's Trees", tags: ["bens-trees", "client"] },
+    { key: "icumd", dir: "D:/Websites/ICUMD Clone Designer", tags: ["icumd", "portfolio", "track-a"] },
+    { key: "field-shader", dir: "D:/Repos/Field-Shader", tags: ["field-shader", "webgl", "shader"] },
+    { key: "tweaker", dir: "D:/Repos/Tweaker", tags: ["tweaker", "front-end", "tooling"] },
+    { key: "nelson-bi", dir: "D:/Repos/Nelson BI", tags: ["nelson-bi", "data", "lead-pipeline"] },
+    { key: "icu-tools", dir: "D:/Repos/icu-tools", tags: ["icu-tools", "delivery-suite"] },
+    { key: "project-hub", dir: "D:/Repos/Integrations and Project Management", tags: ["project-hub", "agency"] },
+    { key: "glenstoolkit", dir: "D:/Repos/GlensToolkit", tags: ["glenstoolkit", "toolkit"] },
+    { key: "vps-infra", dir: "D:/Repos/vps-infra", tags: ["vps-infra", "hosting"] },
+    { key: "permissible-lab", dir: "D:/Repos/permissible-lab", tags: ["permissible-lab", "audio", "dsp"] },
+    { key: "drumgen", dir: "D:/Repos/DrumGen", tags: ["drumgen", "audio", "midi"] },
+  ].map((r) => ({
+    id: `repo-${r.key}`,
+    label: `Repo — ${r.dir.split("/").pop()}`,
+    root: r.dir,
+    slugPrefix: `r-${r.key}-`,
+    type: "reference",
+    tags: ["repo-content", ...r.tags],
+  })),
+
   {
     id: "project-memory",
     label: "Claude Code memory — all other project dirs",

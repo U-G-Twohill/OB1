@@ -378,29 +378,42 @@ function selectEntries() {
 // Without this the daily task re-embeds every row every night — tolerable at 74
 // entries, wasteful at 250+.
 async function fetchIndexState(env) {
-  const state = new Map(); // sourceGroup -> { hash, chunks }
-  const url =
-    `${env.SUPABASE_URL}/rest/v1/thoughts` +
-    `?select=metadata&metadata->>sourceSlug=not.is.null&limit=5000`;
-  const res = await fetch(url, {
-    headers: { apikey: env.SUPABASE_SECRET_KEY, Authorization: `Bearer ${env.SUPABASE_SECRET_KEY}` },
-  });
-  if (!res.ok) {
-    console.warn(`  (could not read index state: HTTP ${res.status} — syncing everything)`);
-    return state;
-  }
-  for (const row of await res.json()) {
-    const m = row.metadata || {};
-    const group = m.sourceGroup || m.sourceSlug;
-    if (!group) continue;
-    const prev = state.get(group);
-    // Count the chunks actually present, and only treat a group as unchanged if every
-    // chunk carries the same hash.
-    if (!prev) state.set(group, { hash: m.contentHash, seen: 1, ok: true });
-    else {
-      prev.seen++;
-      if (prev.hash !== m.contentHash) prev.ok = false;
+  const state = new Map(); // sourceGroup -> { hash, seen, ok }
+
+  // PostgREST caps rows per response (the project's max-rows setting, 1000 by default),
+  // and it does so SILENTLY — a plain `limit=5000` returns 1000 rows and no warning.
+  // Unpaginated, every group past the cap looked absent and was needlessly re-embedded:
+  // 209 sources re-synced when 2 had changed. Page explicitly via Range until short.
+  const PAGE = 1000;
+  for (let offset = 0; ; offset += PAGE) {
+    const url =
+      `${env.SUPABASE_URL}/rest/v1/thoughts` +
+      `?select=metadata&metadata->>sourceSlug=not.is.null&order=id.asc`;
+    const res = await fetch(url, {
+      headers: {
+        apikey: env.SUPABASE_SECRET_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SECRET_KEY}`,
+        Range: `${offset}-${offset + PAGE - 1}`,
+      },
+    });
+    if (!res.ok) {
+      console.warn(`  (could not read index state: HTTP ${res.status} — syncing everything)`);
+      return new Map();
     }
+    const rows = await res.json();
+    for (const row of rows) {
+      const m = row.metadata || {};
+      const group = m.sourceGroup || m.sourceSlug;
+      if (!group) continue;
+      const prev = state.get(group);
+      // Only treat a group as unchanged if every one of its chunks carries the same hash.
+      if (!prev) state.set(group, { hash: m.contentHash, seen: 1, ok: true });
+      else {
+        prev.seen++;
+        if (prev.hash !== m.contentHash) prev.ok = false;
+      }
+    }
+    if (rows.length < PAGE) break;
   }
   return state;
 }
@@ -485,6 +498,15 @@ function runVerify() {
 
   const manifestPaths = new Set(manifest.map((e) => e.path.replace(/\\/g, "/")));
 
+  // UNLISTED means "indexed by nothing" — not "absent from manifest.mjs". A file covered
+  // by a sources.mjs rule is indexed, just without an authored digest, so reporting it
+  // would be a false positive that trains the reader to skim past real findings.
+  const ruleCoveredPaths = new Set(
+    expandSources().map((e) => e.path.replace(/\\/g, "/").toLowerCase())
+  );
+  const isCovered = (relPath, absPath) =>
+    manifestPaths.has(relPath) || ruleCoveredPaths.has(absPath.replace(/\\/g, "/").toLowerCase());
+
   const scopeDirs = [
     { label: "context/", dir: join(commandCenterRoot, "context") },
     { label: "decisions/", dir: join(commandCenterRoot, "decisions") },
@@ -495,10 +517,10 @@ function runVerify() {
 
   let missing = 0;
   for (const { label, dir } of scopeDirs) {
-    const files = walkMarkdown(dir).map((f) => `${label}${f}`);
-    for (const f of files) {
-      if (!manifestPaths.has(f)) {
-        console.log(`  UNLISTED: ${f} — on disk, not in manifest.mjs`);
+    for (const rel of walkMarkdown(dir)) {
+      const f = `${label}${rel}`;
+      if (!isCovered(f, join(dir, rel))) {
+        console.log(`  UNLISTED: ${f} — on disk, indexed by neither manifest.mjs nor a sources.mjs rule`);
         missing++;
       }
     }
@@ -510,8 +532,8 @@ function runVerify() {
     for (const name of readdirSync(memoryRoot)) {
       if (name === "MEMORY.md" || !name.endsWith(".md")) continue;
       const relPath = `memory/${name}`;
-      if (!manifestPaths.has(relPath)) {
-        console.log(`  UNLISTED: ${relPath} — on disk, not in manifest.mjs`);
+      if (!isCovered(relPath, join(memoryRoot, name))) {
+        console.log(`  UNLISTED: ${relPath} — on disk, indexed by neither manifest.mjs nor a sources.mjs rule`);
         missing++;
       }
     }
@@ -589,12 +611,12 @@ function runVerify() {
   console.log(`  ${String(expanded.length).padStart(4)}  total, plus ${manifest.length} curated digests`);
 
   console.log(
-    `\nStill NOT indexed, by decision or by omission:\n` +
-      `  - Client repos (Public Service Center, Ben's Trees, ICUMD) — deferred; see "Growth sequencing" in the playbook.\n` +
-      `  - Whetstone — excluded permanently by ADR 0007.\n` +
-      `  - Non-markdown content (.html vision docs, proposals, images, PDFs).\n` +
-      `  - Other repos' own docs/plans (Field-Shader, project-hub, icu-tools and the rest) — only their CLAUDE.md is digested.\n` +
-      `  - node_modules, browser dumps and the textbook extract — excluded as non-content.`
+    `\nStill NOT indexed, by decision:\n` +
+      `  - Whetstone — permanently excluded (ADR 0007); guarded in MEMORY_DIR_EXCLUDES.\n` +
+      `  - A client's customers' data — the hard NZ Privacy Act / IPP12 boundary.\n` +
+      `  - Dormant repos (GlenTools, TradeApp, WillitsProto, Democratic Workshop) — add a rule if one reactivates.\n` +
+      `  - Non-markdown (.html vision docs, proposals, PDFs, images) — the sync reads .md only.\n` +
+      `  - Vendored/generated trees (node_modules, .venv, worktrees, dist) — not authored content.`
   );
 }
 

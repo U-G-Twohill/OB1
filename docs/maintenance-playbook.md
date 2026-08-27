@@ -159,7 +159,7 @@ Coverage was measured on 2026-08-27 and was far narrower than a clean `--verify`
 | | **Curated** (`manifest.mjs`) | **File-backed** (`sources.mjs`) |
 |---|---|---|
 | Content | a human-authored digest | the file itself, read at sync time |
-| Count | 74 entries | 150 files → 289 chunks |
+| Count | 74 entries | 694 files → ~1,200 chunks |
 | Retrieval | better — dense, deliberate prose | good; raw prose embeds less cleanly |
 | Drift | **possible** — needs `digestedAt` and re-authoring | **impossible by construction** |
 | Adding a file | hand-write an entry | nothing; it is picked up next run |
@@ -174,23 +174,55 @@ Coverage was measured on 2026-08-27 and was far narrower than a clean `--verify`
 - **Incremental:** every row carries a `contentHash`. Unchanged entries are skipped, so the daily task re-embeds only what actually changed — the first full run wrote 363 rows, the next wrote 0. `--force` overrides.
 - **Surrogate safety:** slicing UTF-16 at an arbitrary index can cut an emoji in half and leave a lone surrogate, which `JSON.stringify` emits and PostgREST rejects with `PGRST102`. Boundaries are surrogate-aware and a final pass strips any that survive. Found via a `🔸` in a PSC legal doc.
 
+### Project repos are in, as of 2026-08-27
+
+Twelve repos are now indexed by rule — PSC, Ben's Trees, ICUMD, Field-Shader, Tweaker, Nelson BI, icu-tools, project-hub, GlensToolkit, vps-infra, permissible-lab, DrumGen. Before this, only each repo's `CLAUDE.md` was digested, so the actual work (plans, `STATE.md`, harvest logs, design notes) was invisible from the laptop and browser — exactly the surfaces with no local checkout.
+
+**Client repos were deferred on two stated conditions** in the original migration: that the sync tool had a track record, and that each repo's state had settled. Both now hold, and the privacy scan below is what discharged the remaining risk.
+
+**The excludes did most of the work here.** Two would have quietly wrecked the index:
+
+- **Nelson BI** looked like 6.2 MB of markdown. **5.75 MB of that was a single `ATTRIBUTION.md` inside `.venv`** — 93% of the repo's markdown by weight, none of it Uriah's. Excluding virtualenvs took it to 39 real files.
+- **Ben's Trees** carries **531 markdown files inside `.claude/worktrees`**: three full checkouts left by March agent sessions. Indexing them would have triple-counted the repo and surfaced superseded copies as if current. Excluded, it is 13 files.
+
+Anything indexing a repo tree needs these excludes. Check a new root's real file count before adding it — the raw number is usually wrong.
+
 ### The privacy boundary is enforced in `sources.mjs`, not by care
 
 The excludes are load-bearing: `node_modules` (38 files that would otherwise have been indexed), browser dumps, the copyrighted textbook extract, and `MEMORY_DIR_EXCLUDES` — which names Whetstone as a standing guard **for when it gets a memory directory**, not because it has one now. A scan before the first run confirmed no customer data in scope; the only matches were the workspace *describing* this very boundary.
 
 **Any new rule must be checked the same way.** Point rules at planning, research and orientation material — never at anything holding a client's *customers'* data.
 
+The scan run before adding the twelve repos, worth repeating verbatim when adding another:
+
+```bash
+# live credentials — any hit is disqualifying
+grep -rohE 'sk_live_[A-Za-z0-9]{6,}|pk_live_[A-Za-z0-9]{6,}|whsec_[A-Za-z0-9]{6,}' <root> --include='*.md'
+# third-party personal email addresses
+grep -rohEi '[a-z0-9._%+-]+@(gmail|hotmail|outlook|yahoo)\.[a-z]{2,}' <root> --include='*.md'
+# customer-data shapes — read every hit, do not count them
+grep -rlEi 'INSERT INTO|customer_email|buyer_email|attendee|ticket_holder' <root> --include='*.md'
+```
+
+**The third one always hits on PSC and is meant to.** Every match was a feature description — *"Attendees — CSV + print door list by surname"* — describing an admin screen, not containing a door list. **Read the hits; never clear the scan on counts alone.** The distinction between "documents the schema" and "contains the rows" is the whole boundary.
+
 ---
 
-## Growth sequencing — what's NOT in the brain yet, on purpose
+## Growth sequencing — what's in, what's out, and why
 
-**Client repos (Public Service Center, Ben's Trees, ICUMD) are deliberately excluded from this first migration.** They're the fastest-changing content in the whole stack right now (PSC especially, mid production-cutover) — migrating them before the sync tool had a track record would mean learning the tool's rough edges on the highest-stakes content. Extend the manifest to them once:
-- The sync tool has survived a few real re-syncs on the stable content here without surprises, and
-- Each client repo's own state has settled enough that a digest won't be stale within days of being written.
+**Client repos are now IN, as of 2026-08-27.** This reverses the original deferral, which was conditional rather than permanent: it asked that the sync tool survive real re-syncs without surprises, and that each repo's state settle. Both held — and the surprises the deferral was protecting against turned out to be in the *tooling* (digest drift, lone surrogates, virtualenv bloat), all found and fixed on the stable content first, exactly as intended.
 
-**Dormant/reference repos** (GlenTools, TradeApp, WillitsProto, Democratic Workshop, etc.) — likely skip entirely. They're already flagged out-of-scope in `context/system-map.md`; no reason to index them until they become active again.
+**Still out, and why:**
 
-**When ready to extend:** add new manifest entries following the same `sourceSlug` naming convention (a new prefix, e.g. `psc-` or `bt-`), pointing at each client repo's own `STATE.md`/status doc, and sync as a new batch. The `--batch=` flag in the sync script already supports arbitrary prefixes — no code change needed, just extend `BATCH_PREFIX` in `scripts/brain-sync.mjs` if you want a shortcut flag for it.
+| Excluded | Reason | Permanent? |
+|---|---|---|
+| **Whetstone** | ADR 0007 — unfiltered personal political reasoning; must never surface in a session doing client work | **Yes** |
+| A client's *customers'* data | NZ Privacy Act / IPP12 — see the boundary section below | **Yes** |
+| Dormant repos (GlenTools, TradeApp, WillitsProto, Democratic Workshop) | Flagged out-of-scope in `context/system-map.md`; nothing to gain until they reactivate | No — add a rule if one wakes up |
+| Non-markdown (`.html` vision docs, proposals, PDFs, images) | The sync only reads `.md`. Several HTML docs have markdown twins that *are* indexed | No — would need a converter |
+| Vendored and generated trees | `GLOBAL_EXCLUDES` — not authored content | Yes |
+
+**To extend:** add a rule to `sources.mjs`. No manifest entries, no `BATCH_PREFIX` edit, no digest to write — a rule is a root, a slug prefix and some tags. Run the privacy scan above first, and check the root's *real* file count after excludes before trusting its size.
 
 ---
 
