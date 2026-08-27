@@ -99,3 +99,14 @@ This repo also has a maintainer-local GSD layer in `.planning/`.
 - Start with `.planning/STATE.md`, then read `.planning/PROJECT.md`, `.planning/ROADMAP.md`, and the relevant `.planning/codebase/*.md` documents.
 - Keep `.planning/` local. It is gitignored intentionally and is not part of the public contribution contract or upstream PR scope.
 - Public contributor rules still come from `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, and the committed repo files.
+
+## Fork-local: ICU Media Design deployment (not upstream scope)
+
+This fork (`U-G-Twohill/OB1`, cloned to `D:\Repos\icu-brain`) runs a live personal instance. Fork-local operational docs live in `docs/architecture.md`, `docs/golden-queries.md`, and `docs/maintenance-playbook.md`. **These are not upstream contribution scope** — keep fork-local changes out of upstream PRs.
+
+**⚠️ Open work as of 2026-08-27 — read `docs/maintenance-playbook.md` first.**
+
+1. ~~**The index is stale.**~~ **Resolved 2026-08-27.** The index had fallen ~8 weeks behind (last write 2026-07-03) and the Supabase project auto-paused on the free tier. Caught up: 9 missing sources added to `manifest.mjs` (ADRs 0006–0008, plans 0015–0018, 2 memory files), all 74 entries synced, `--verify` clean. Staleness is now covered by two daily Windows scheduled tasks — `OpenBrain-Sync` (full sync, 09:00) and `OpenBrain-KeepWarm` (a ping that stops the free tier idling into a pause, 12:00). **This reverses the playbook's former "no silent automation" rule**; the reasoning and the health-check commands are in the playbook's Automation section. Desktop only — the laptop has no equivalent.
+2. **The "git is the source of truth" rule is documented but still not enforced in code.** `update_thought` (`integrations/update-thought-mcp/index.ts:75-229`) selects by UUID and never checks `sourceSlug`, so it silently clobbers git-sourced rows on the next sync; and `runVerify()` never queries the database, so *drift* remains undetectable even though staleness is now handled. The daily sync narrows the window but does not close this — a row edited through `update_thought` is silently reverted and nothing reports it. **Don't read a green `logs/last-sync.json` as "the index is correct".** The fix is specified in the maintenance playbook's "Open work" section and in Command Center `plans/0015-adr-0006-evidence-gate-fixes.md` Step 7.
+
+Governing decision: Command Center `decisions/0006-evidence-gating-keys-on-availability.md` — *where a fact lives in two writable places, name the arbiter explicitly and make every derived copy read-only or write-back.* Here git is the arbiter; the code should enforce that rather than trusting discipline.

@@ -25,7 +25,75 @@ Folded into habits you already have, not a new ritual:
 4. **Weekly, regardless, as a backstop.** Run `--verify` to catch anything that slipped through 1–3, and pair it with Nate B Jones' own Weekly Review companion prompt (ask the connected AI what themes or forgotten action items surface across recent captures) — cross-check what it surfaces against what's actually in `status.md`. This is a natural fit for the existing Friday harvest-triage slot from Plan 0008, if you want to bolt it on there rather than invent a new weekly moment.
 5. **After a full manifest rebuild or big edit round** — run the full `node scripts/brain-sync.mjs` (all batches), then `--verify`, then spot-check 2-3 golden queries.
 
-**What NOT to do:** don't wire this into a silent automatic hook that runs on every git commit without you seeing it. Per Uriah's stated working style (surface reasoning, stay in the loop), sync stays a deliberate, visible action — a reminder is fine, a silent background sync is not.
+### Automation (added 2026-08-27 — this reverses the previous rule)
+
+**Superseded:** this playbook used to say *"don't wire this into a silent automatic hook… sync stays a deliberate, visible action — a reminder is fine, a silent background sync is not."* That rule was reversed on 2026-08-27, on evidence. The index sat **~8 weeks** behind git (last write 2026-07-03, discovered 2026-08-27) and the Supabase project auto-paused on the free tier in the meantime. Every trigger in the list above is a manual habit, and none of them fired. **A deliberate action nobody performs is not a safeguard.**
+
+The replacement rule is narrower and keeps what the original was actually protecting: **silent when it works, loud when it doesn't.** The concern was never automation itself — it was losing visibility. So the automation records its own health where a session can check it, rather than assuming it ran.
+
+Two Windows scheduled tasks, both registered under Uriah's user account on the desktop:
+
+| Task | Runs | Does | Why separate |
+|---|---|---|---|
+| `OpenBrain-Sync` | daily 09:00 | `node scripts/scheduled-sync.mjs` — full sync, then writes `logs/last-sync.json` | The primary defence. Keeping the project awake is a side effect of doing real work. |
+| `OpenBrain-KeepWarm` | daily 12:00 | `node scripts/keep-warm.mjs --quiet` — one authenticated read | The last line of defence, deliberately sharing almost nothing with the sync path |
+
+**Why the ping is not redundant.** The sync generates activity only while it succeeds. A broken manifest entry, an expired OpenRouter key, or a moved source repo stops the sync running — and says nothing to Supabase, so the project quietly pauses about a week later. That is precisely the 2026-07-03 → 2026-08-27 failure. `keep-warm.mjs` therefore imports no manifest, calls no embedding API, and writes nothing: one authenticated `GET`. If the sync is broken, the ping still runs.
+
+**Why time-based rather than a git hook.** None of the sync's sources live in this repo — they are in `Command Center Plan`, the Claude Code memory directory, and four other repos' `CLAUDE.md` files. A `post-commit` hook in `icu-brain` would never fire for the content that actually changes. A hook in Command Center would cover most of it, but not the memory directory (not a git repo) or the other four. Time-based covers everything.
+
+**Checking on it:**
+
+```bash
+node scripts/keep-warm.mjs        # is the project awake right now?
+cat logs/last-sync.json           # did the last sync succeed, and what failed if not?
+```
+
+`logs/last-sync.json` carries `status`, timestamps, per-entry counts, and the actual `[FAILED]` lines — so a failure names what broke rather than just counting it. `logs/` is gitignored.
+
+**Manage the tasks:**
+
+```powershell
+Get-ScheduledTask -TaskName "OpenBrain-*"                    # state
+Get-ScheduledTaskInfo -TaskName "OpenBrain-Sync"             # last run + result code
+Start-ScheduledTask -TaskName "OpenBrain-Sync"               # run now
+Disable-ScheduledTask -TaskName "OpenBrain-Sync"             # pause it
+```
+
+Both use `-StartWhenAvailable`, so a missed run (machine off at 09:00) fires when the machine next wakes rather than being skipped.
+
+**Still true, and the reason this is safe to automate:** the automation only ever runs *git → brain*. It never writes back to git and never invents content, so the worst a bad automated run can do is leave the index stale — the failure it is there to prevent — not corrupt a source. That asymmetry is what makes silent operation acceptable here and would not make it acceptable in the other direction.
+
+**Two caveats worth knowing.** The tasks are registered on the desktop only — the laptop has no equivalent, so don't assume a sync happened because you were working on the laptop. And the sync currently re-embeds and rewrites all 74 entries every run whether or not anything changed (~60s, negligible OpenRouter cost at this corpus size); if the manifest grows substantially, add change detection rather than reaching for a longer interval.
+
+---
+
+## ⚠️ Open work — the core rule above is documented but NOT enforced in code
+
+The 2026-07-18 ADR 0006 sweep (Command Center, finding **S3**) found that "git is the source of truth, the brain is a synced index" is currently **discipline only**. Nothing stops it being violated, and nothing detects when it has been.
+
+**Status as of 2026-08-27:** the *staleness* half of this is now addressed operationally by the scheduled tasks above — but only operationally. The code-level gaps below are unchanged and still open.
+
+**Two concrete gaps:**
+
+1. **`update_thought` will silently clobber git-sourced rows.** `integrations/update-thought-mcp/index.ts:75-229` selects purely by UUID `id` and never checks `sourceSlug`. Edit a git-sourced row through it and the next `brain-sync.mjs` run — which does delete-then-reinsert by `metadata->>sourceSlug` — reverts it to the stale git version with no warning. Worse, the metadata shallow-merge at :172-177 means a caller can even set or clear `sourceSlug` itself.
+2. **`--verify` cannot detect drift.** `runVerify()` never queries Supabase at all — it only diffs the filesystem against `manifest.mjs` (UNLISTED / STALE). So database-vs-source divergence is invisible. **This is not theoretical: the index sat 14 days behind git as of 2026-07-18, and then ~8 weeks behind by 2026-08-27, with nothing surfacing either.**
+
+> **The scheduled sync makes staleness less likely; it does not make drift detectable.** A daily sync narrows the window in which the index can be wrong, but `--verify` still cannot answer "does the database match the source?" — it only answers "is every source file listed in the manifest?". If a row is edited through `update_thought`, the daily sync silently reverts it and nothing reports that it happened. Gap 1 and the parity check in gap 2 are the actual fix; the automation is a floor, not a substitute. Do not let a green `last-sync.json` be read as "the index is correct".
+
+**The fix (decided, ready to implement):**
+
+- **The git-owned test is `metadata->>'sourceSlug'` being present.** No schema change needed — `brain-sync.mjs` is the only writer that sets it, and `capture_thought` (`server/index.ts:439-506`) never does, so absent = ad-hoc = freely editable.
+- `update_thought` refuses when `existing.metadata?.sourceSlug` is present, returning the repo's existing error shape — `{ content: [{ type: 'text' as const, text: ... }], isError: true }` — with a message naming `metadata.sourceFile` and telling the caller to edit the file and re-sync. Also guard `sourceSlug` against `metadata_patch`.
+- **Open question to resolve first:** read the `upsert_thought` SQL function and determine whether its `content_fingerprint` dedup lets `capture_thought` *update* an existing git-owned row on exact content match. If it can, apply the same refusal there.
+- Add a real parity check to `--verify`: fetch rows carrying a `sourceSlug` and compare against the manifest entry.
+- Add a staleness line: newest `updated_at` among git-owned rows vs the newest mtime among manifest sources.
+
+> **Compare content, not `content_fingerprint`.** The fingerprint is a SHA-256 computed *inside* the `upsert_thought` SQL function over normalised content. Reimplementing that normalisation client-side is a silent-divergence bug: a mismatch would report drift that isn't there and train you to ignore the signal. Comparing content costs more bandwidth and cannot drift.
+
+**Consider homing the recurring staleness check in Command Center's `plans/0011-coordination-layer-tooling.md` `/repo-health` tool** rather than building a scheduler here — that plan already owns cross-repo drift detection.
+
+**Full specification:** `D:\Repos\Command Center Plan\decisions\0006-evidence-gating-keys-on-availability.md` (finding S3) and `plans/0015-adr-0006-evidence-gate-fixes.md` Step 7.
 
 ---
 
