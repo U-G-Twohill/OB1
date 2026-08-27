@@ -13,13 +13,18 @@
 //   node scripts/brain-sync.mjs --batch=A        sync one batch (A|B|C, by sourceSlug prefix convention below)
 //   node scripts/brain-sync.mjs --slug=user-profile   sync a single entry
 //   node scripts/brain-sync.mjs --dry-run        compute + embed, print, write nothing
-//   node scripts/brain-sync.mjs --verify         diff manifest paths against files actually on disk in scope dirs
+//   node scripts/brain-sync.mjs --verify      manifest completeness + digest drift + coverage report
+//   node scripts/brain-sync.mjs --rule=cc-output   sync one sources.mjs rule
+//   node scripts/brain-sync.mjs --curated-only     manifest digests only, skip file-backed rules
+//   node scripts/brain-sync.mjs --force            re-embed everything, ignoring the unchanged-skip
 
 import { readFileSync, existsSync } from "node:fs";
 import { readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { manifest } from "../manifest.mjs";
+import { sources, GLOBAL_EXCLUDES, MEMORY_DIR_EXCLUDES } from "../sources.mjs";
+import { createHash } from "node:crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -63,6 +68,157 @@ function digestedAtInstant(entry) {
     : new Date(entry.digestedAt);
 }
 
+// ---------------------------------------------------------------------------
+// File-backed sources (sources.mjs) — expanded at scan time, read from disk.
+// ---------------------------------------------------------------------------
+
+// text-embedding-3-small accepts 8191 tokens. Markdown with tables and code runs
+// denser than prose, so budget conservatively at ~3k tokens per chunk and overlap a
+// little so a paragraph split across a boundary is still findable from either side.
+const CHUNK_CHARS = 12000;
+const CHUNK_OVERLAP = 400;
+
+function slugify(s) {
+  return s
+    .toLowerCase()
+    .replace(/\.md$/, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 90);
+}
+
+function excluded(fullPath) {
+  const p = fullPath.replace(/\\/g, "/");
+  return GLOBAL_EXCLUDES.some((re) => re.test(p));
+}
+
+// JS strings are UTF-16, so slicing at an arbitrary index can cut an astral character
+// (any emoji) in half and leave a lone surrogate. JSON.stringify emits it happily, but
+// it is invalid JSON and PostgREST rejects the whole request with PGRST102 "Empty or
+// invalid json". A 🔸 in a PSC legal doc is exactly how this was found.
+function safeBoundary(text, idx) {
+  const c = text.charCodeAt(idx - 1);
+  return c >= 0xd800 && c <= 0xdbff ? idx - 1 : idx; // don't end on a high surrogate
+}
+
+// Last line of defence: drop any unpaired surrogate that survives slicing.
+function stripLoneSurrogates(s) {
+  return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+}
+
+// Split on paragraph boundaries where possible so chunks stay semantically whole.
+function chunkText(text) {
+  if (text.length <= CHUNK_CHARS) return [stripLoneSurrogates(text)];
+  const chunks = [];
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(i + CHUNK_CHARS, text.length);
+    if (end < text.length) {
+      const window = text.slice(i, end);
+      const br = Math.max(window.lastIndexOf("\n\n"), window.lastIndexOf("\n## "));
+      if (br > CHUNK_CHARS * 0.5) end = i + br;
+      end = safeBoundary(text, end);
+    }
+    chunks.push(stripLoneSurrogates(text.slice(i, end).trim()));
+    if (end >= text.length) break;
+    i = safeBoundary(text, Math.max(end - CHUNK_OVERLAP, i + 1));
+  }
+  return chunks.filter((c) => c.length > 0);
+}
+
+function walkFiles(dir, base, out = [], depth = Infinity, level = 0) {
+  if (!existsSync(dir)) return out;
+  let names;
+  try { names = readdirSync(dir); } catch { return out; }
+  for (const name of names) {
+    const full = join(dir, name);
+    if (excluded(full)) continue;
+    let st;
+    try { st = statSync(full); } catch { continue; }
+    if (st.isDirectory()) {
+      if (name.startsWith(".") || level + 1 >= depth) continue;
+      walkFiles(full, base, out, depth, level + 1);
+    } else if (name.endsWith(".md")) {
+      out.push(full.replace(/\\/g, "/"));
+    }
+  }
+  return out;
+}
+
+// Expand every rule in sources.mjs into concrete file entries, minus anything a
+// curated manifest entry already covers (curated prose wins — it is better retrieval).
+function expandSources() {
+  const curatedPaths = new Set(manifest.map((e) => resolveSourcePath(e).replace(/\\/g, "/").toLowerCase()));
+  const entries = [];
+  const seen = new Set();
+
+  for (const rule of sources) {
+    let files = [];
+    if (rule.memoryScan) {
+      if (!existsSync(rule.memoryScan)) continue;
+      for (const proj of readdirSync(rule.memoryScan)) {
+        if (MEMORY_DIR_EXCLUDES.has(proj)) continue;
+        const memDir = join(rule.memoryScan, proj, "memory");
+        if (!existsSync(memDir)) continue;
+        for (const f of walkFiles(memDir, memDir, [], 1)) {
+          if (f.endsWith("/MEMORY.md")) continue; // the index, not a memory
+          files.push({ full: f, label: `${proj}/${f.split("/").pop()}` });
+        }
+      }
+    } else {
+      const root = rule.root.replace(/\\/g, "/");
+      files = walkFiles(root, root, [], rule.depth ?? Infinity).map((full) => ({
+        full,
+        label: full.slice(root.length + 1),
+      }));
+    }
+
+    for (const { full, label } of files) {
+      if (curatedPaths.has(full.toLowerCase())) continue; // curated entry wins
+      const slug = rule.slugPrefix + slugify(label);
+      if (seen.has(slug)) continue;
+      seen.add(slug);
+      entries.push({
+        sourceSlug: slug,
+        path: full,
+        type: rule.type,
+        tags: rule.tags,
+        strategy: "file",
+        ruleId: rule.id,
+      });
+    }
+  }
+  return entries;
+}
+
+// Read a file-backed entry and turn it into one row per chunk. Chunks share a
+// sourceGroup so re-sync can delete the whole set even when the chunk count changes.
+function materialize(entry) {
+  if (entry.strategy !== "file") {
+    return [{ ...entry, sourceGroup: entry.sourceSlug, content: entry.content, chunk: 1, chunks: 1 }];
+  }
+  const raw = readFileSync(entry.path, "utf8");
+  const rel = entry.path.split("/").slice(-2).join("/");
+  const parts = chunkText(raw);
+  return parts.map((text, i) => ({
+    ...entry,
+    sourceGroup: entry.sourceSlug,
+    sourceSlug: parts.length === 1 ? entry.sourceSlug : `${entry.sourceSlug}#${i + 1}`,
+    chunk: i + 1,
+    chunks: parts.length,
+    // A header so a retrieved chunk can say what it is and where it came from —
+    // without it, chunk 7 of a research doc arrives as context-free prose.
+    content:
+      parts.length === 1
+        ? `Source: ${rel}\n\n${text}`
+        : `Source: ${rel} (part ${i + 1} of ${parts.length})\n\n${text}`,
+  }));
+}
+
+function contentHash(text) {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
 function isDigestStale(entry) {
   const mtime = sourceMtime(entry);
   const authored = digestedAtInstant(entry);
@@ -92,8 +248,11 @@ const args = process.argv.slice(2);
 const flags = {
   batch: (args.find((a) => a.startsWith("--batch=")) || "").split("=")[1],
   slug: (args.find((a) => a.startsWith("--slug=")) || "").split("=")[1],
+  rule: (args.find((a) => a.startsWith("--rule=")) || "").split("=")[1],
   dryRun: args.includes("--dry-run"),
   verify: args.includes("--verify"),
+  curatedOnly: args.includes("--curated-only"),
+  force: args.includes("--force"),
 };
 
 const BATCH_PREFIX = { A: "memory-", B: "cc-", C: "repo-" };
@@ -118,8 +277,11 @@ async function getEmbedding(text, openrouterKey) {
   return data.data[0].embedding;
 }
 
-async function deleteBySlug(slug, env) {
-  const url = `${env.SUPABASE_URL}/rest/v1/thoughts?metadata->>sourceSlug=eq.${encodeURIComponent(slug)}`;
+// Delete by sourceGroup, not sourceSlug: a chunked file is many rows, and the chunk
+// count changes as the file grows or shrinks. Deleting by group removes orphans that
+// slug-matching would strand.
+async function deleteByGroup(group, env) {
+  const url = `${env.SUPABASE_URL}/rest/v1/thoughts?metadata->>sourceGroup=eq.${encodeURIComponent(group)}`;
   const res = await fetch(url, {
     method: "DELETE",
     headers: {
@@ -130,7 +292,7 @@ async function deleteBySlug(slug, env) {
   });
   if (!res.ok && res.status !== 404) {
     const body = await res.text();
-    throw new Error(`Delete-by-slug failed for ${slug} (${res.status}): ${body.slice(0, 300)}`);
+    throw new Error(`Delete-by-group failed for ${group} (${res.status}): ${body.slice(0, 300)}`);
   }
 }
 
@@ -154,7 +316,13 @@ async function upsertThought(entry, env) {
       syncedAt: new Date().toISOString(),
       digestedAt: entry.digestedAt || null,
       sourceMtime: mtime ? mtime.toISOString() : null,
-      digestStale: isDigestStale(entry),
+      // A file-backed row is read from disk every run, so it cannot drift by
+      // construction — false, never null, and never true.
+      digestStale: entry.strategy === "file" ? false : isDigestStale(entry),
+      sourceGroup: entry.sourceGroup || entry.sourceSlug,
+      contentHash: entry.contentHash || null,
+      chunk: entry.chunks > 1 ? `${entry.chunk}/${entry.chunks}` : null,
+      rule: entry.ruleId || null,
     },
   };
   const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/upsert_thought`, {
@@ -191,8 +359,10 @@ async function patchEmbedding(id, embedding, env) {
 }
 
 function selectEntries() {
-  let entries = manifest;
+  // Curated digests first, then everything the sources.mjs rules expand to.
+  let entries = [...manifest.map((e) => ({ ...e, ruleId: "curated" })), ...(flags.curatedOnly ? [] : expandSources())];
   if (flags.slug) entries = entries.filter((e) => e.sourceSlug === flags.slug);
+  else if (flags.rule) entries = entries.filter((e) => e.ruleId === flags.rule);
   else if (flags.batch) {
     const prefix = BATCH_PREFIX[flags.batch.toUpperCase()];
     if (!prefix) {
@@ -204,36 +374,92 @@ function selectEntries() {
   return entries;
 }
 
+// One query for what is already indexed, so an unchanged entry costs nothing.
+// Without this the daily task re-embeds every row every night — tolerable at 74
+// entries, wasteful at 250+.
+async function fetchIndexState(env) {
+  const state = new Map(); // sourceGroup -> { hash, chunks }
+  const url =
+    `${env.SUPABASE_URL}/rest/v1/thoughts` +
+    `?select=metadata&metadata->>sourceSlug=not.is.null&limit=5000`;
+  const res = await fetch(url, {
+    headers: { apikey: env.SUPABASE_SECRET_KEY, Authorization: `Bearer ${env.SUPABASE_SECRET_KEY}` },
+  });
+  if (!res.ok) {
+    console.warn(`  (could not read index state: HTTP ${res.status} — syncing everything)`);
+    return state;
+  }
+  for (const row of await res.json()) {
+    const m = row.metadata || {};
+    const group = m.sourceGroup || m.sourceSlug;
+    if (!group) continue;
+    const prev = state.get(group);
+    // Count the chunks actually present, and only treat a group as unchanged if every
+    // chunk carries the same hash.
+    if (!prev) state.set(group, { hash: m.contentHash, seen: 1, ok: true });
+    else {
+      prev.seen++;
+      if (prev.hash !== m.contentHash) prev.ok = false;
+    }
+  }
+  return state;
+}
+
 async function runSync() {
   const env = loadEnv();
   const entries = selectEntries();
-  console.log(`brain-sync: ${entries.length} entr${entries.length === 1 ? "y" : "ies"} selected${flags.dryRun ? " (DRY RUN)" : ""}`);
+  const curated = entries.filter((e) => e.ruleId === "curated").length;
 
-  let ok = 0, failed = 0;
+  console.log(
+    `brain-sync: ${entries.length} source${entries.length === 1 ? "" : "s"} selected ` +
+      `(${curated} curated digest${curated === 1 ? "" : "s"}, ${entries.length - curated} file-backed)` +
+      `${flags.dryRun ? " — DRY RUN" : ""}`
+  );
+
+  const indexState = flags.dryRun || flags.force ? new Map() : await fetchIndexState(env);
+
+  let ok = 0, failed = 0, skipped = 0, rows = 0;
   for (const entry of entries) {
     try {
-      const preview = entry.content.slice(0, 90).replace(/\s+/g, " ");
-      if (flags.dryRun) {
-        // still hit the embedding API in dry-run so cost/latency is visible, but no Supabase writes
-        await getEmbedding(entry.content, env.OPENROUTER_API_KEY);
-        console.log(`  [dry-run OK] ${entry.sourceSlug} — "${preview}..."`);
-        ok++;
+      // Materialize first: reading and chunking is local and cheap, and the resulting
+      // hash is what decides whether the expensive part (embedding) runs at all.
+      const parts = materialize(entry);
+      const hash = contentHash(parts.map((p) => p.content).join(" "));
+      const prior = indexState.get(entry.sourceSlug);
+
+      if (!flags.force && prior?.ok && prior.hash === hash && prior.seen === parts.length) {
+        skipped++;
         continue;
       }
-      await deleteBySlug(entry.sourceSlug, env);
-      const embedding = await getEmbedding(entry.content, env.OPENROUTER_API_KEY);
-      const upsertResult = await upsertThought(entry, env);
-      const id = Array.isArray(upsertResult) ? upsertResult[0]?.id : upsertResult?.id;
-      if (!id) throw new Error(`No id returned from upsert_thought for ${entry.sourceSlug}`);
-      await patchEmbedding(id, embedding, env);
-      console.log(`  [synced] ${entry.sourceSlug} (id=${id})`);
+
+      if (flags.dryRun) {
+        console.log(`  [dry-run] ${entry.sourceSlug} — ${parts.length} chunk(s), ${parts.reduce((n, p) => n + p.content.length, 0)} chars`);
+        ok++;
+        rows += parts.length;
+        continue;
+      }
+
+      await deleteByGroup(entry.sourceSlug, env);
+      for (const part of parts) {
+        const embedding = await getEmbedding(part.content, env.OPENROUTER_API_KEY);
+        const upsertResult = await upsertThought({ ...part, contentHash: hash }, env);
+        const id = Array.isArray(upsertResult) ? upsertResult[0]?.id : upsertResult?.id;
+        if (!id) throw new Error(`No id returned from upsert_thought for ${part.sourceSlug}`);
+        await patchEmbedding(id, embedding, env);
+        rows++;
+      }
+      console.log(`  [synced] ${entry.sourceSlug}${parts.length > 1 ? ` (${parts.length} chunks)` : ""}`);
       ok++;
     } catch (err) {
       console.error(`  [FAILED] ${entry.sourceSlug}: ${err.message}`);
       failed++;
     }
   }
-  console.log(`\nbrain-sync summary: ${ok} ok, ${failed} failed, ${entries.length} total.`);
+
+  console.log(
+    `\nbrain-sync summary: ${ok} ok, ${failed} failed, ${skipped} unchanged (skipped), ` +
+      `${entries.length} total — ${rows} row(s) written.`
+  );
   if (failed > 0) process.exitCode = 1;
 }
 
@@ -349,19 +575,27 @@ function runVerify() {
     );
   }
 
-  // Say plainly what this check does not look at, so a clean run is not read as
-  // "everything is indexed". These directories hold real content that is deliberately
-  // (or accidentally) out of scope; silence about them reads as coverage.
-  const unscanned = ["outputs", "reference", "research"]
-    .map((d) => ({ d, n: walkMarkdown(join(commandCenterRoot, d)).length }))
-    .filter((x) => x.n > 0);
-  if (unscanned.length) {
-    console.log(
-      `\nNot examined by this check: ${unscanned.map((x) => `${x.d}/ (${x.n} .md)`).join(", ")}` +
-        `, Command Center root files, and every Claude Code memory directory except\n` +
-        `${memoryRoot}. Coverage there is a scope decision, not something this command verifies.`
-    );
+  // Report what the file-backed rules cover, and then say plainly what nothing covers.
+  // A clean run must never be readable as "everything is indexed".
+  const expanded = expandSources();
+  const byRule = {};
+  for (const e of expanded) byRule[e.ruleId] = (byRule[e.ruleId] || 0) + 1;
+
+  console.log(`\nFile-backed coverage (sources.mjs — read from disk, cannot drift):`);
+  for (const rule of sources) {
+    const n = byRule[rule.id] || 0;
+    console.log(`  ${String(n).padStart(4)}  ${rule.id.padEnd(16)} ${rule.label}`);
   }
+  console.log(`  ${String(expanded.length).padStart(4)}  total, plus ${manifest.length} curated digests`);
+
+  console.log(
+    `\nStill NOT indexed, by decision or by omission:\n` +
+      `  - Client repos (Public Service Center, Ben's Trees, ICUMD) — deferred; see "Growth sequencing" in the playbook.\n` +
+      `  - Whetstone — excluded permanently by ADR 0007.\n` +
+      `  - Non-markdown content (.html vision docs, proposals, images, PDFs).\n` +
+      `  - Other repos' own docs/plans (Field-Shader, project-hub, icu-tools and the rest) — only their CLAUDE.md is digested.\n` +
+      `  - node_modules, browser dumps and the textbook extract — excluded as non-content.`
+  );
 }
 
 if (flags.verify) {

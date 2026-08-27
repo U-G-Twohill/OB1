@@ -152,26 +152,33 @@ A memory file last edited 2026-06-06 still asserts PSC's POS is solved, and its 
 
 ---
 
-## Coverage — measured 2026-08-27, and much narrower than `--verify` implies
+## Two source models: curated digests and file-backed rules
 
-`--verify` walks `context/`, `decisions/`, `plans/` and **one** memory directory. A clean run says "everything in scope is listed"; it does not say "everything is indexed". Measured:
+Coverage was measured on 2026-08-27 and was far narrower than a clean `--verify` implied — `outputs/` (73 real files), `reference/`, `research/`, three root files and **67 memory files across 18 other projects** were all unindexed. That is finding **F-03** from plan 0017. It is now closed, by adding a second source model rather than by hand-writing 150 more digests.
 
-| Content | Files | Synced |
+| | **Curated** (`manifest.mjs`) | **File-backed** (`sources.mjs`) |
 |---|---|---|
-| `context/` · `decisions/` · `plans/` | 7 · 8 · 19 | **all** |
-| Command Center root files | 6 | 3 (`CLAUDE.md`, `SESSION-SUMMARY.md`, `status.md`) — not `HARVEST.md`, `README.md`, `shell-aliases.md` |
-| **`outputs/`** | **~110** | **0** |
-| `reference/` · `research/` | 5 · 2 | **0** |
-| **Other Claude Code memory dirs (18)** | **67** | **0** — only Command Center's 33 sync |
+| Content | a human-authored digest | the file itself, read at sync time |
+| Count | 74 entries | 150 files → 289 chunks |
+| Retrieval | better — dense, deliberate prose | good; raw prose embeds less cleanly |
+| Drift | **possible** — needs `digestedAt` and re-authoring | **impossible by construction** |
+| Adding a file | hand-write an entry | nothing; it is picked up next run |
 
-`--verify` now prints what it does not examine, so a clean run stops reading as full coverage.
+**Use curated for what carries the most weight** — status, system map, ADRs, plans, memory. **Rules cover the long tail**, where the cost of hand-authoring exceeds the retrieval gain. A file matched by both is left to the curated entry; the sync dedupes on path.
 
-Two gaps worth a deliberate decision rather than drift:
+### How the rules work
 
-- **`outputs/` holds the highest-value unindexed content** — `tooling-backlog.md` (the Fable run called it "the healthiest index he has"), the whole `fable-portfolio-run/`, `friday-triage/` logs, `tweaker-spec.md`. This is finding **F-03** from plan 0017, now measured.
-- **67 memory files across 18 projects are unreachable from the laptop or browser** — ICUMD-Clone-Designer 12, Field-Shader 11, PSC 10, REAPER 8, DrumGen 6. These matter most precisely where there is no local checkout, which is the laptop's normal state.
+`sources.mjs` declares roots, slug prefixes, tags and excludes. `--verify` prints coverage per rule and, importantly, prints **what nothing covers**, so a clean run can never be misread as total.
 
-Both are scope calls, not oversights — but make them on purpose.
+- **Chunking:** anything over 12,000 chars is split on paragraph boundaries with a 400-char overlap, one row per chunk, each prefixed with `Source: <path> (part N of M)` so a retrieved fragment can say where it came from. Chunks share a `sourceGroup`, and re-sync deletes by group so a shrinking file leaves no orphans.
+- **Incremental:** every row carries a `contentHash`. Unchanged entries are skipped, so the daily task re-embeds only what actually changed — the first full run wrote 363 rows, the next wrote 0. `--force` overrides.
+- **Surrogate safety:** slicing UTF-16 at an arbitrary index can cut an emoji in half and leave a lone surrogate, which `JSON.stringify` emits and PostgREST rejects with `PGRST102`. Boundaries are surrogate-aware and a final pass strips any that survive. Found via a `🔸` in a PSC legal doc.
+
+### The privacy boundary is enforced in `sources.mjs`, not by care
+
+The excludes are load-bearing: `node_modules` (38 files that would otherwise have been indexed), browser dumps, the copyrighted textbook extract, and `MEMORY_DIR_EXCLUDES` — which names Whetstone as a standing guard **for when it gets a memory directory**, not because it has one now. A scan before the first run confirmed no customer data in scope; the only matches were the workspace *describing* this very boundary.
+
+**Any new rule must be checked the same way.** Point rules at planning, research and orientation material — never at anything holding a client's *customers'* data.
 
 ---
 

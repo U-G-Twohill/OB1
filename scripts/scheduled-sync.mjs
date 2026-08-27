@@ -73,11 +73,16 @@ logLine("---- scheduled sync starting ----");
 const { code, out } = await runSync();
 const durationMs = Date.now() - started;
 
-// brain-sync prints a summary line: "brain-sync summary: N ok, N failed, N total."
-const summary = out.match(/brain-sync summary: (\d+) ok, (\d+) failed, (\d+) total/);
-const ok = summary ? Number(summary[1]) : null;
-const failed = summary ? Number(summary[2]) : null;
-const total = summary ? Number(summary[3]) : null;
+// brain-sync's summary line, e.g.
+//   "brain-sync summary: 1 ok, 0 failed, 223 unchanged (skipped), 224 total — 3 row(s) written."
+// The skipped/rows fields are optional so this keeps parsing older output. Parsed
+// loosely on purpose: a format change should not be able to report a healthy run.
+const num = (re) => { const m = out.match(re); return m ? Number(m[1]) : null; };
+const ok = num(/brain-sync summary: (\d+) ok/);
+const failed = num(/brain-sync summary: \d+ ok, (\d+) failed/);
+const skipped = num(/(\d+) unchanged \(skipped\)/);
+const total = num(/(\d+) total/);
+const rows = num(/(\d+) row\(s\) written/);
 
 // Any per-entry failure lines, so the status file names what broke rather than just counting it.
 const failures = out
@@ -106,12 +111,15 @@ writeStatus({
   finishedAt: new Date().toISOString(),
   durationMs,
   exitCode: code,
-  entries: { ok, failed, total },
+  entries: { ok, failed, skipped, total, rowsWritten: rows },
   failures,
 });
 
 if (healthy) {
-  logLine(`OK    ${ok}/${total} entries synced in ${Math.round(durationMs / 1000)}s`);
+  logLine(
+    `OK    ${total} source(s): ${ok} synced, ${skipped ?? 0} unchanged, ` +
+      `${rows ?? 0} row(s) written in ${Math.round(durationMs / 1000)}s`
+  );
 } else {
   logLine(`FAIL  exit=${code} ok=${ok} failed=${failed} total=${total} — see ${STATUS_FILE}`);
   process.exitCode = 1;
