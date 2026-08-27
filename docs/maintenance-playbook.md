@@ -97,12 +97,81 @@ The 2026-07-18 ADR 0006 sweep (Command Center, finding **S3**) found that "git i
 
 ---
 
+## The thing that surprised everyone: the sync never reads your source files
+
+**`brain-sync.mjs` embeds `entry.content` — the hand-authored digest stored inside `manifest.mjs`. It opens `entry.path` only to check the file still exists.**
+
+Read that twice, because every wrong assumption about this system follows from missing it:
+
+- **Editing a source file changes nothing in the brain.** Not until someone rewrites that entry's `content` by hand.
+- **Re-running the sync does not fix a stale digest.** It re-embeds the same stale prose.
+- **The manifest is a digest cache that goes stale by hand.** `--verify`'s old "STALE" check only ever meant "the file was deleted".
+
+This was discovered on 2026-08-27 and it had been true since the tool was written. **12 of 74 entries had a source edited after the digest was authored. Four were 56 days stale — and they were `status.md`, `system-map.md`, `current-data.md` and the workspace `CLAUDE.md`: exactly the orientation documents a session reads first.**
+
+The concrete cost, live in the index at the time: the brain told you PSC's POS was *"already solved — do not pitch"* and the opening was *"August 2026"*. Both had been reversed. Bepoz is now a genuine integration block with its own fork plan, and the opening moved to September and was published on a verified GBP profile. A session acting on that would have steered away from the exact integration work that was blocking.
+
+### What now guards it
+
+**`digestedAt` on every manifest entry** — the date (or exact ISO timestamp) that entry's prose was authored. **`--verify` compares it against the source's mtime** and reports `DIGEST DRIFT` with the age. Two accepted forms, deliberately:
+
+| Form | Read as | Use when |
+|---|---|---|
+| `"2026-08-27"` | end of that day | hand-typing a digest; lenient, so it never cries wolf |
+| `"2026-08-27T02:05:00.000Z"` | exact | a tool stamps it — catches same-day edits |
+
+Same-day edits are not hypothetical: while this was being fixed, a concurrent Command Center session committed the Friday triage and invalidated four digests that had been written **an hour earlier**. Bare dates cannot see that; timestamps can.
+
+Every synced row now also carries `digestedAt`, `sourceMtime` and `digestStale` in its metadata, so drift is queryable from the database, not just from the CLI:
+
+```bash
+curl -s "$SUPABASE_URL/rest/v1/thoughts?select=metadata&metadata->>digestStale=eq.true" \
+  -H "apikey: $SUPABASE_SECRET_KEY" -H "Authorization: Bearer $SUPABASE_SECRET_KEY"
+```
+
+**Fixing a drifted entry:** rewrite its `content` in `manifest.mjs`, bump `digestedAt`, then sync. There is no shortcut, and that is the honest cost of the digest model — the summaries are good precisely because a human wrote them, and that is also why they rot.
+
+### Why `syncedAt` alone was actively harmful
+
+Before this, a row carried only `syncedAt`. Once the daily task existed, **every row was stamped with today's date on every run regardless of whether its content had changed** — so 56-day-old prose arrived wearing a fresh timestamp, and `last-sync.json` read `74/74 ok`. The one signal that might have revealed the problem (rows frozen at 2026-07-03) was destroyed by the automation built to help. `digestedAt` + `sourceMtime` are the honest pair; `syncedAt` only ever meant "when this row was last written".
+
+### What this check still cannot see
+
+**It compares the digest to its source. It cannot compare the source to reality.**
+
+A memory file last edited 2026-06-06 still asserts PSC's POS is solved, and its digest matches it perfectly — so `--verify` is silent, correctly. `status.md` and `current-data.md` contradict it. That is the same ADR 0006 fault one level up: **the same fact in two writable places (a memory file and a context file) with no arbiter**, and no tool here can arbitrate it. Keeping sources true to reality is what the Friday triage and the re-derivation sessions are for; the brain can only ever be as accurate as what git says.
+
+---
+
 ## Ad hoc capture → promotion rule
 
 1. Capture freely, any client, any time: "remember this," "capture this thought," etc.
 2. If it comes up again, or you find yourself wanting to reference it a second time, that's the signal to give it a real home — a line in the relevant context file, a new memory file, a tooling-backlog entry, whatever fits.
 3. Add it to `manifest.mjs` with a `sourceSlug`, sync it in.
 4. The original ad hoc capture can stay (it's harmless, tagged `source: "mcp"` so it's distinguishable from synced content) or be cleaned up later during a quarterly sweep — not urgent either way.
+
+---
+
+## Coverage — measured 2026-08-27, and much narrower than `--verify` implies
+
+`--verify` walks `context/`, `decisions/`, `plans/` and **one** memory directory. A clean run says "everything in scope is listed"; it does not say "everything is indexed". Measured:
+
+| Content | Files | Synced |
+|---|---|---|
+| `context/` · `decisions/` · `plans/` | 7 · 8 · 19 | **all** |
+| Command Center root files | 6 | 3 (`CLAUDE.md`, `SESSION-SUMMARY.md`, `status.md`) — not `HARVEST.md`, `README.md`, `shell-aliases.md` |
+| **`outputs/`** | **~110** | **0** |
+| `reference/` · `research/` | 5 · 2 | **0** |
+| **Other Claude Code memory dirs (18)** | **67** | **0** — only Command Center's 33 sync |
+
+`--verify` now prints what it does not examine, so a clean run stops reading as full coverage.
+
+Two gaps worth a deliberate decision rather than drift:
+
+- **`outputs/` holds the highest-value unindexed content** — `tooling-backlog.md` (the Fable run called it "the healthiest index he has"), the whole `fable-portfolio-run/`, `friday-triage/` logs, `tweaker-spec.md`. This is finding **F-03** from plan 0017, now measured.
+- **67 memory files across 18 projects are unreachable from the laptop or browser** — ICUMD-Clone-Designer 12, Field-Shader 11, PSC 10, REAPER 8, DrumGen 6. These matter most precisely where there is no local checkout, which is the laptop's normal state.
+
+Both are scope calls, not oversights — but make them on purpose.
 
 ---
 

@@ -24,6 +24,52 @@ import { manifest } from "../manifest.mjs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 
+// Source roots. Hoisted to module scope because both the sync path (to stamp each
+// row with its source's mtime) and the verify path (to detect drift) need them.
+const COMMAND_CENTER_ROOT = process.env.COMMAND_CENTER_ROOT || "D:/Repos/Command Center Plan";
+const MEMORY_ROOT =
+  process.env.CLAUDE_MEMORY_ROOT ||
+  "C:/Users/ugtwo/.claude/projects/D--Repos-Command-Center-Plan/memory";
+
+// A manifest entry's `path` is relative to Command Center, relative to the memory
+// directory, or absolute (the cross-repo CLAUDE.md orientation digests).
+function resolveSourcePath(entry) {
+  const p = entry.path.replace(/\\/g, "/");
+  if (p.startsWith("D:/") || p.startsWith("C:/")) return p;
+  if (p.startsWith("memory/")) return join(MEMORY_ROOT, p.slice("memory/".length));
+  return join(COMMAND_CENTER_ROOT, p);
+}
+
+// The mtime of the file a digest was written from, or null if it is unreadable.
+function sourceMtime(entry) {
+  try {
+    return statSync(resolveSourcePath(entry)).mtime;
+  } catch {
+    return null;
+  }
+}
+
+// When a digest's prose was authored, as a comparable instant.
+//
+// Two accepted forms, deliberately. A bare "YYYY-MM-DD" is what a human types and is
+// read as END of that day — lenient, so it cannot cry wolf, but it therefore cannot
+// see a same-day edit. A full ISO timestamp is exact. Prefer the timestamp when a
+// tool writes the stamp; a same-day edit is not hypothetical, one happened on
+// 2026-08-27 when a concurrent session committed to Command Center mid-sync.
+function digestedAtInstant(entry) {
+  if (!entry.digestedAt) return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(entry.digestedAt)
+    ? new Date(`${entry.digestedAt}T23:59:59.999Z`)
+    : new Date(entry.digestedAt);
+}
+
+function isDigestStale(entry) {
+  const mtime = sourceMtime(entry);
+  const authored = digestedAtInstant(entry);
+  if (!mtime || !authored) return null; // unknowable, not false
+  return mtime > authored;
+}
+
 function loadEnv() {
   const envPath = join(REPO_ROOT, ".env");
   if (!existsSync(envPath)) {
@@ -89,6 +135,14 @@ async function deleteBySlug(slug, env) {
 }
 
 async function upsertThought(entry, env) {
+  // `syncedAt` says when this row was last written; it says NOTHING about whether the
+  // digest still reflects its source, because the sync embeds entry.content and never
+  // reads the file. Stamping only syncedAt made every row look freshly verified after
+  // a scheduled run — which is how four orientation digests sat 56 days stale while
+  // the index reported healthy. digestedAt + sourceMtime are the honest pair: if
+  // sourceMtime is newer than digestedAt, the prose in the brain is out of date no
+  // matter how recently it was synced.
+  const mtime = sourceMtime(entry);
   const payload = {
     metadata: {
       sourceSlug: entry.sourceSlug,
@@ -98,6 +152,9 @@ async function upsertThought(entry, env) {
       strategy: entry.strategy,
       source: "brain-sync",
       syncedAt: new Date().toISOString(),
+      digestedAt: entry.digestedAt || null,
+      sourceMtime: mtime ? mtime.toISOString() : null,
+      digestStale: isDigestStale(entry),
     },
   };
   const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/upsert_thought`, {
@@ -197,11 +254,8 @@ function walkMarkdown(dir, base = dir, results = []) {
 
 function runVerify() {
   // Scope: Command Center's own context/plans/decisions dirs + the Claude Code memory dir.
-  // This only checks the two directories this repo can see paths into cleanly; the
-  // Command Center + memory roots are read via an absolute path override below.
-  const commandCenterRoot = process.env.COMMAND_CENTER_ROOT || "D:/Repos/Command Center Plan";
-  const memoryRoot = process.env.CLAUDE_MEMORY_ROOT ||
-    "C:/Users/ugtwo/.claude/projects/D--Repos-Command-Center-Plan/memory";
+  const commandCenterRoot = COMMAND_CENTER_ROOT;
+  const memoryRoot = MEMORY_ROOT;
 
   const manifestPaths = new Set(manifest.map((e) => e.path.replace(/\\/g, "/")));
 
@@ -250,8 +304,64 @@ function runVerify() {
     }
   }
 
-  console.log(`\nverify summary: ${missing} unlisted file(s), ${stale} stale manifest entr${stale === 1 ? "y" : "ies"}.`);
-  if (missing === 0 && stale === 0) console.log("Manifest is complete against scope directories.");
+  // Digest drift: the source file changed after its digest prose was written.
+  //
+  // This is the check the tool was missing for its whole life. brain-sync embeds
+  // entry.content — a hand-authored digest — and never opens the source file, so
+  // editing a source changes nothing about what is in the brain. A daily sync keeps
+  // the database matching the MANIFEST; only this check keeps the manifest honest
+  // against GIT. Found 12 drifted entries on 2026-08-27, four of them 56 days stale
+  // and all four being the orientation docs a session reads first.
+  let drifted = 0;
+  const noStamp = [];
+  for (const entry of manifest) {
+    const mtime = sourceMtime(entry);
+    if (!mtime) continue; // missing files are already reported as STALE above
+    if (!entry.digestedAt) {
+      noStamp.push(entry.sourceSlug);
+      continue;
+    }
+    const authored = digestedAtInstant(entry);
+    if (mtime > authored) {
+      const days = Math.round((mtime - authored) / 86400000);
+      console.log(
+        `  DIGEST DRIFT (${String(days).padStart(3)}d): ${entry.sourceSlug} — ` +
+          `${entry.path} edited ${mtime.toISOString().slice(0, 10)}, digest written ${entry.digestedAt}`
+      );
+      drifted++;
+    }
+  }
+  if (noStamp.length) {
+    console.log(`\n  ${noStamp.length} entr${noStamp.length === 1 ? "y has" : "ies have"} no digestedAt stamp — drift cannot be checked for: ${noStamp.join(", ")}`);
+  }
+
+  console.log(
+    `\nverify summary: ${missing} unlisted file(s), ${stale} stale manifest entr${stale === 1 ? "y" : "ies"}, ${drifted} drifted digest(s).`
+  );
+  if (missing === 0 && stale === 0 && drifted === 0) {
+    console.log("Manifest is complete and every digest is at least as new as its source.");
+  }
+  if (drifted > 0) {
+    console.log(
+      "\nA drifted digest means the brain is serving prose written before the source changed.\n" +
+        "Re-running the sync will NOT fix it — rewrite the entry's `content` in manifest.mjs,\n" +
+        "bump its `digestedAt`, then sync."
+    );
+  }
+
+  // Say plainly what this check does not look at, so a clean run is not read as
+  // "everything is indexed". These directories hold real content that is deliberately
+  // (or accidentally) out of scope; silence about them reads as coverage.
+  const unscanned = ["outputs", "reference", "research"]
+    .map((d) => ({ d, n: walkMarkdown(join(commandCenterRoot, d)).length }))
+    .filter((x) => x.n > 0);
+  if (unscanned.length) {
+    console.log(
+      `\nNot examined by this check: ${unscanned.map((x) => `${x.d}/ (${x.n} .md)`).join(", ")}` +
+        `, Command Center root files, and every Claude Code memory directory except\n` +
+        `${memoryRoot}. Coverage there is a scope decision, not something this command verifies.`
+    );
+  }
 }
 
 if (flags.verify) {
