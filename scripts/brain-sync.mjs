@@ -101,9 +101,26 @@ function safeBoundary(text, idx) {
   return c >= 0xd800 && c <= 0xdbff ? idx - 1 : idx; // don't end on a high surrogate
 }
 
-// Last line of defence: drop any unpaired surrogate that survives slicing.
+// Last line of defence for anything Postgres will refuse to store as text.
+// Two distinct hazards, both found the same way — by a nightly sync failing:
+//
+//   1. Unpaired surrogates, produced by slicing a chunk mid-astral-character.
+//      A 🔸 in a PSC legal doc is how that one was found.
+//   2. NUL (U+0000). Postgres rejects it outright — `22P05: unsupported
+//      Unicode escape sequence` — and unlike a lone surrogate it is present in
+//      the SOURCE FILE, not introduced by chunking. Found 2026-09-07: three
+//      Field-Shader verify outputs each carry one NUL, because WebGL's
+//      getShaderInfoLog() returns a NUL-TERMINATED string and the harness wrote
+//      it into the report verbatim. That failed the scheduled sync every night
+//      from 2026-08-31 to 2026-09-06 with nothing surfacing it.
+//
+// Strip rather than reject: one bad byte in a 40 KB report should cost the byte,
+// not the document. Both return paths of chunkText() pass through here, so this
+// is the single choke point.
 function stripLoneSurrogates(s) {
-  return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+  return s
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
+    .replace(/\u0000/g, "");
 }
 
 // Split on paragraph boundaries where possible so chunks stay semantically whole.
