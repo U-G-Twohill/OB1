@@ -12,19 +12,29 @@
 // "is the automation actually healthy?", so a session can check the automation's own
 // state without trusting that it ran.
 //
+// The status is written as "running" BEFORE any work starts. A killed process cannot
+// report on itself, so without this a killed run leaves the previous run's "ok" in
+// place, and that file then says the opposite of what happened. The next run reads a
+// leftover "running" and reports the interruption.
+//
 // Usage:
 //   node scripts/scheduled-sync.mjs        run the sync, log + record status
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { waitForDns, isNetworkFailure } from "./lib/network.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const LOG_DIR = join(REPO_ROOT, "logs");
 const LOG_FILE = join(LOG_DIR, "brain-sync.log");
 const STATUS_FILE = join(LOG_DIR, "last-sync.json");
+
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 60_000;
+const ERROR_TAIL_LINES = 15;
 
 function ensureLogDir() {
   if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
@@ -50,6 +60,38 @@ function writeStatus(status) {
   }
 }
 
+function readPreviousStatus() {
+  try {
+    return JSON.parse(readFileSync(STATUS_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function supabaseHost() {
+  try {
+    const match = readFileSync(join(REPO_ROOT, ".env"), "utf8").match(/^SUPABASE_URL=(.+)$/m);
+    return match ? new URL(match[1].trim()).hostname : null;
+  } catch {
+    return null;
+  }
+}
+
+function logChildOutput(out) {
+  // Indent the child's own output under the run header so the log stays readable.
+  try {
+    ensureLogDir();
+    const body = out
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => `    ${l}\n`)
+      .join("");
+    appendFileSync(LOG_FILE, body);
+  } catch {
+    // Never let a logging failure change the run's outcome.
+  }
+}
+
 function runSync() {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [join(__dirname, "brain-sync.mjs")], {
@@ -68,9 +110,39 @@ function runSync() {
 const startedAt = new Date().toISOString();
 const started = Date.now();
 
-logLine("---- scheduled sync starting ----");
+const previous = readPreviousStatus();
+const interruptedPrevious = previous?.status === "running" ? previous.startedAt ?? "unknown" : null;
+// Older status files predate lastOkAt, so fall back to their own finish time if they were healthy.
+const lastOkAt = previous?.lastOkAt ?? (previous?.status === "ok" ? previous.finishedAt : null);
 
-const { code, out } = await runSync();
+writeStatus({ status: "running", startedAt, pid: process.pid, lastOkAt, interruptedPrevious });
+
+logLine("---- scheduled sync starting ----");
+if (interruptedPrevious) {
+  logLine(`WARN  the run started ${interruptedPrevious} never finished — it was interrupted`);
+}
+
+const host = supabaseHost();
+let waitedMs = 0;
+if (host) {
+  const network = await waitForDns(host);
+  waitedMs = network.waitedMs;
+  if (waitedMs > 5000) logLine(`INFO  waited ${Math.round(waitedMs / 1000)}s for the network`);
+  if (!network.ok) logLine(`WARN  still no DNS for ${host} (${network.error}); trying anyway`);
+}
+
+let attempts = 0;
+let code;
+let out;
+for (;;) {
+  attempts++;
+  ({ code, out } = await runSync());
+  logChildOutput(out);
+  if (code === 0 || attempts >= MAX_ATTEMPTS || !isNetworkFailure(out)) break;
+  logLine(`WARN  attempt ${attempts} hit a network failure; retrying in ${RETRY_DELAY_MS / 1000}s`);
+  await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+}
+
 const durationMs = Date.now() - started;
 
 // brain-sync's summary line, e.g.
@@ -90,37 +162,33 @@ const failures = out
   .filter((l) => l.includes("[FAILED]"))
   .map((l) => l.trim());
 
-// Indent the child's own output under the run header so the log stays readable.
-try {
-  ensureLogDir();
-  const body = out
-    .split("\n")
-    .filter((l) => l.trim())
-    .map((l) => `    ${l}\n`)
-    .join("");
-  appendFileSync(LOG_FILE, body);
-} catch {
-  // Never let a logging failure change the run's outcome.
-}
-
 const healthy = code === 0 && failed === 0 && total !== null && total > 0;
+const finishedAt = new Date().toISOString();
 
 writeStatus({
   status: healthy ? "ok" : "failed",
   startedAt,
-  finishedAt: new Date().toISOString(),
+  finishedAt,
   durationMs,
   exitCode: code,
+  attempts,
+  waitedMs,
+  lastOkAt: healthy ? finishedAt : lastOkAt,
+  interruptedPrevious,
   entries: { ok, failed, skipped, total, rowsWritten: rows },
   failures,
+  // A crash before the summary line has no [FAILED] entries, so keep the end of its
+  // output. Without this, the reason survived only in the log.
+  ...(healthy ? {} : { error: out.trim().split("\n").slice(-ERROR_TAIL_LINES).join("\n") }),
 });
 
 if (healthy) {
   logLine(
     `OK    ${total} source(s): ${ok} synced, ${skipped ?? 0} unchanged, ` +
-      `${rows ?? 0} row(s) written in ${Math.round(durationMs / 1000)}s`
+      `${rows ?? 0} row(s) written in ${Math.round(durationMs / 1000)}s` +
+      (attempts > 1 ? ` (attempt ${attempts})` : "")
   );
 } else {
-  logLine(`FAIL  exit=${code} ok=${ok} failed=${failed} total=${total} — see ${STATUS_FILE}`);
+  logLine(`FAIL  exit=${code} ok=${ok} failed=${failed} total=${total} after ${attempts} attempt(s) — see ${STATUS_FILE}`);
   process.exitCode = 1;
 }

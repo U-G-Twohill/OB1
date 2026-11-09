@@ -19,7 +19,9 @@
 // most weight (status, system map, ADRs, plans, memory). Curated wins where it is worth
 // the hand-work; rules cover the long tail.
 //
-// A file matched by BOTH is left to the curated entry — the sync dedupes on path.
+// A file matched by BOTH is left to the curated entry — the sync dedupes on path. If that
+// entry's digest is older than its source, the sync serves the source file instead until
+// the digest is re-authored (see withDigestFallback in scripts/brain-sync.mjs).
 //
 // PRIVACY BOUNDARY (hard rule, see docs/maintenance-playbook.md): these roots may only
 // ever point at planning, research and orientation material. A client's *customers'*
@@ -104,11 +106,40 @@ export const sources = [
     id: "cc-root",
     label: "Command Center — root docs",
     root: CC,
-    depth: 1, // root files only; context/decisions/plans are curated in manifest.mjs
+    depth: 1, // root files only; context/decisions/plans have their own rules below
     slugPrefix: "cc-root-",
     type: "reference",
     tags: ["command-center", "workspace"],
     note: "HARVEST.md, README.md, shell-aliases.md. CLAUDE.md / status.md / SESSION-SUMMARY.md are curated and dedupe out.",
+  },
+  // Plans, ADRs and context used to need a hand-written manifest entry each, and that
+  // step stopped happening: by 2026-11-07, plans 0019-0031 and ADRs 0009-0010 were
+  // unindexed. These rules pick up whatever has no curated entry, so a new file is
+  // indexed on the next run. Slug prefixes differ from the curated cc-plan-* and
+  // cc-decision-* conventions so the two can never collide.
+  {
+    id: "cc-context",
+    label: "Command Center — context/",
+    root: `${CC}/context`,
+    slugPrefix: "cc-context-file-",
+    type: "reference",
+    tags: ["command-center", "context"],
+  },
+  {
+    id: "cc-decisions",
+    label: "Command Center — decisions/",
+    root: `${CC}/decisions`,
+    slugPrefix: "cc-decisions-",
+    type: "decision",
+    tags: ["command-center", "decision"],
+  },
+  {
+    id: "cc-plans",
+    label: "Command Center — plans/",
+    root: `${CC}/plans`,
+    slugPrefix: "cc-plans-",
+    type: "status",
+    tags: ["command-center", "plan"],
   },
   // --- Project repos ------------------------------------------------------
   //

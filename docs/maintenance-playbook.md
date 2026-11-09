@@ -21,7 +21,7 @@ Folded into habits you already have, not a new ritual:
 
 1. **As part of the end-of-session status.md update.** When you (or a session) update `status.md`'s current-state, that's the trigger to also run `node scripts/brain-sync.mjs --slug=cc-status-current`. One extra command in a step you already do every session.
 2. **Whenever a plan, ADR, or context file changes meaningfully** — add/update its manifest entry, then `--slug=<that-entry>`. Small and cheap; do it in the same session as the edit if you can.
-3. **Whenever a new plan/ADR/context file is created** — add a manifest entry for it (Batch B convention: `cc-plan-NNNN-...`, `cc-decision-adr-NNNN`, `cc-context-...`) and sync it. Run `--verify` afterward to confirm it's now listed.
+3. **Whenever a new plan/ADR/context file is created** — nothing is required; a rule indexes it on the next sync. Add a manifest entry (Batch B convention: `cc-plan-NNNN-...`, `cc-decision-adr-NNNN`, `cc-context-...`) only if it deserves a hand-written digest.
 4. **Weekly, regardless, as a backstop.** Run `--verify` to catch anything that slipped through 1–3, and pair it with Nate B Jones' own Weekly Review companion prompt (ask the connected AI what themes or forgotten action items surface across recent captures) — cross-check what it surfaces against what's actually in `status.md`. This is a natural fit for the existing Friday harvest-triage slot from Plan 0008, if you want to bolt it on there rather than invent a new weekly moment.
 5. **After a full manifest rebuild or big edit round** — run the full `node scripts/brain-sync.mjs` (all batches), then `--verify`, then spot-check 2-3 golden queries.
 
@@ -35,8 +35,8 @@ Two Windows scheduled tasks, both registered under Uriah's user account on the d
 
 | Task | Runs | Does | Why separate |
 |---|---|---|---|
-| `OpenBrain-Sync` | daily 09:00 | `node scripts/scheduled-sync.mjs` — full sync, then writes `logs/last-sync.json` | The primary defence. Keeping the project awake is a side effect of doing real work. |
-| `OpenBrain-KeepWarm` | daily 12:00 | `node scripts/keep-warm.mjs --quiet` — one authenticated read | The last line of defence, deliberately sharing almost nothing with the sync path |
+| `OpenBrain-Sync` | daily 10:00 NZDT (09:00 NZST) | `node scripts/scheduled-sync.mjs` — full sync, then writes `logs/last-sync.json` | The primary defence. Keeping the project awake is a side effect of doing real work. |
+| `OpenBrain-KeepWarm` | daily 13:00 NZDT (12:00 NZST) | `node scripts/keep-warm.mjs --quiet` — one authenticated read | The last line of defence, deliberately sharing almost nothing with the sync path |
 
 **Why the ping is not redundant.** The sync generates activity only while it succeeds. A broken manifest entry, an expired OpenRouter key, or a moved source repo stops the sync running — and says nothing to Supabase, so the project quietly pauses about a week later. That is precisely the 2026-07-03 → 2026-08-27 failure. `keep-warm.mjs` therefore imports no manifest, calls no embedding API, and writes nothing: one authenticated `GET`. If the sync is broken, the ping still runs.
 
@@ -51,6 +51,16 @@ cat logs/last-sync.json           # did the last sync succeed, and what failed i
 
 `logs/last-sync.json` carries `status`, timestamps, per-entry counts, and the actual `[FAILED]` lines — so a failure names what broke rather than just counting it. `logs/` is gitignored.
 
+| `status` | Meaning |
+|---|---|
+| `ok` | The run finished cleanly. |
+| `failed` | The run finished badly. `failures` names failed entries and `error` holds the end of the output, so a crash keeps its reason. |
+| `running` | A run has started and not finished. **If no sync process is alive, that run was killed.** The next run logs a `WARN` and records it in `interruptedPrevious`. |
+
+`lastOkAt` is the time of the last clean run, whatever has happened since. That is the field to read for "how stale could this be?".
+
+**Network failures (added 2026-11-07).** `StartWhenAvailable` runs a missed task the moment the machine wakes, often before DNS works, and that was the cause of the wake-time `ENOTFOUND` failures. Both scripts now wait up to 5 minutes for DNS. The sync also retries up to 3 attempts, but only on network-shaped failures, because a bad entry would just fail the same way again. `attempts` and `waitedMs` show when this happened. A task killed by Windows or a closed console is still lost until the next day's run, but it is now reported.
+
 **Manage the tasks:**
 
 ```powershell
@@ -64,7 +74,7 @@ Both use `-StartWhenAvailable`, so a missed run (machine off at 09:00) fires whe
 
 **Still true, and the reason this is safe to automate:** the automation only ever runs *git → brain*. It never writes back to git and never invents content, so the worst a bad automated run can do is leave the index stale — the failure it is there to prevent — not corrupt a source. That asymmetry is what makes silent operation acceptable here and would not make it acceptable in the other direction.
 
-**Two caveats worth knowing.** The tasks are registered on the desktop only — the laptop has no equivalent, so don't assume a sync happened because you were working on the laptop. And the sync currently re-embeds and rewrites all 74 entries every run whether or not anything changed (~60s, negligible OpenRouter cost at this corpus size); if the manifest grows substantially, add change detection rather than reaching for a longer interval.
+**One caveat worth knowing.** The tasks are registered on the desktop only — the laptop has no equivalent, so don't assume a sync happened because you were working on the laptop. Sources are read from the desktop's own disk, so work pushed from the laptop reaches the brain only after the desktop checkout pulls it.
 
 ---
 
@@ -72,22 +82,20 @@ Both use `-StartWhenAvailable`, so a missed run (machine off at 09:00) fires whe
 
 The 2026-07-18 ADR 0006 sweep (Command Center, finding **S3**) found that "git is the source of truth, the brain is a synced index" is currently **discipline only**. Nothing stops it being violated, and nothing detects when it has been.
 
-**Status as of 2026-08-27:** the *staleness* half of this is now addressed operationally by the scheduled tasks above — but only operationally. The code-level gaps below are unchanged and still open.
+**Status as of 2026-11-07:** gap 2 is closed. `--verify` now compares every synced row's content with what a sync would write, and reports `DB DRIFT`, `DB MISSING`, `DB EXTRA CHUNK` and `DB ORPHAN`, with the newest write time. It downloads about 20 MB, so it is not part of the scheduled run, which means a row edited through `update_thought` is still reverted without notice unless `--verify` ran first. Gap 1 and the `capture_thought` question below are still open. Gap 2's text is kept as the record of why this exists.
 
 **Two concrete gaps:**
 
 1. **`update_thought` will silently clobber git-sourced rows.** `integrations/update-thought-mcp/index.ts:75-229` selects purely by UUID `id` and never checks `sourceSlug`. Edit a git-sourced row through it and the next `brain-sync.mjs` run — which does delete-then-reinsert by `metadata->>sourceSlug` — reverts it to the stale git version with no warning. Worse, the metadata shallow-merge at :172-177 means a caller can even set or clear `sourceSlug` itself.
 2. **`--verify` cannot detect drift.** `runVerify()` never queries Supabase at all — it only diffs the filesystem against `manifest.mjs` (UNLISTED / STALE). So database-vs-source divergence is invisible. **This is not theoretical: the index sat 14 days behind git as of 2026-07-18, and then ~8 weeks behind by 2026-08-27, with nothing surfacing either.**
 
-> **The scheduled sync makes staleness less likely; it does not make drift detectable.** A daily sync narrows the window in which the index can be wrong, but `--verify` still cannot answer "does the database match the source?" — it only answers "is every source file listed in the manifest?". If a row is edited through `update_thought`, the daily sync silently reverts it and nothing reports that it happened. Gap 1 and the parity check in gap 2 are the actual fix; the automation is a floor, not a substitute. Do not let a green `last-sync.json` be read as "the index is correct".
+> **Do not let a green `last-sync.json` be read as "the index is correct".** It means the database matches its sources. It says nothing about whether those sources are true.
 
 **The fix (decided, ready to implement):**
 
 - **The git-owned test is `metadata->>'sourceSlug'` being present.** No schema change needed — `brain-sync.mjs` is the only writer that sets it, and `capture_thought` (`server/index.ts:439-506`) never does, so absent = ad-hoc = freely editable.
 - `update_thought` refuses when `existing.metadata?.sourceSlug` is present, returning the repo's existing error shape — `{ content: [{ type: 'text' as const, text: ... }], isError: true }` — with a message naming `metadata.sourceFile` and telling the caller to edit the file and re-sync. Also guard `sourceSlug` against `metadata_patch`.
 - **Open question to resolve first:** read the `upsert_thought` SQL function and determine whether its `content_fingerprint` dedup lets `capture_thought` *update* an existing git-owned row on exact content match. If it can, apply the same refusal there.
-- Add a real parity check to `--verify`: fetch rows carrying a `sourceSlug` and compare against the manifest entry.
-- Add a staleness line: newest `updated_at` among git-owned rows vs the newest mtime among manifest sources.
 
 > **Compare content, not `content_fingerprint`.** The fingerprint is a SHA-256 computed *inside* the `upsert_thought` SQL function over normalised content. Reimplementing that normalisation client-side is a silent-divergence bug: a mismatch would report drift that isn't there and train you to ignore the signal. Comparing content costs more bandwidth and cannot drift.
 
@@ -97,15 +105,24 @@ The 2026-07-18 ADR 0006 sweep (Command Center, finding **S3**) found that "git i
 
 ---
 
-## The thing that surprised everyone: the sync never reads your source files
+## Digests go stale, so a drifted digest is replaced by its source
 
-**`brain-sync.mjs` embeds `entry.content` — the hand-authored digest stored inside `manifest.mjs`. It opens `entry.path` only to check the file still exists.**
+**Since 2026-11-07, a curated entry whose source file is newer than its `digestedAt` is served from the source file instead.** Editing a source reaches the brain on the next sync, with no manual step. The row keeps its `sourceSlug`, is chunked if large, and carries `digestSuperseded: true`. Bumping `digestedAt` after rewriting the digest restores it automatically.
 
-Read that twice, because every wrong assumption about this system follows from missing it:
+Why: detection alone did not work. After all 12 drifted digests were fixed on 2026-08-27, 12 had drifted again by 2026-11-07, and the strategy digest was 75 days behind while `--verify` reported it daily.
 
-- **Editing a source file changes nothing in the brain.** Not until someone rewrites that entry's `content` by hand.
-- **Re-running the sync does not fix a stale digest.** It re-embeds the same stale prose.
-- **The manifest is a digest cache that goes stale by hand.** `--verify`'s old "STALE" check only ever meant "the file was deleted".
+**The cost is retrieval quality, and it is real.** Raw prose embeds less cleanly than a digest, so a superseded entry can rank lower. Re-authoring a digest is still worth doing for documents people ask about often. It is now an improvement to retrieval, not a correctness fix. To list them:
+
+```bash
+curl -s "$SUPABASE_URL/rest/v1/thoughts?select=metadata->>sourceSlug&metadata->>digestSuperseded=eq.true" \
+  -H "apikey: $SUPABASE_SECRET_KEY" -H "Authorization: Bearer $SUPABASE_SECRET_KEY"
+```
+
+**Every curated source can now reach the brain as raw text.** Treat them like rule sources under the privacy boundary below: never point a manifest entry at a file holding a client's customers' data, even if the digest would leave that data out.
+
+### How this was found
+
+Originally, `brain-sync.mjs` embedded only the hand-authored digest and opened the source file just to check that it existed. So editing a source changed nothing, and re-running the sync re-embedded the same stale prose.
 
 This was discovered on 2026-08-27 and it had been true since the tool was written. **12 of 74 entries had a source edited after the digest was authored. Four were 56 days stale — and they were `status.md`, `system-map.md`, `current-data.md` and the workspace `CLAUDE.md`: exactly the orientation documents a session reads first.**
 
@@ -129,7 +146,7 @@ curl -s "$SUPABASE_URL/rest/v1/thoughts?select=metadata&metadata->>digestStale=e
   -H "apikey: $SUPABASE_SECRET_KEY" -H "Authorization: Bearer $SUPABASE_SECRET_KEY"
 ```
 
-**Fixing a drifted entry:** rewrite its `content` in `manifest.mjs`, bump `digestedAt`, then sync. There is no shortcut, and that is the honest cost of the digest model — the summaries are good precisely because a human wrote them, and that is also why they rot.
+**Restoring a drifted digest:** rewrite its `content` in `manifest.mjs`, bump `digestedAt`, then sync.
 
 ### Why `syncedAt` alone was actively harmful
 
@@ -159,12 +176,14 @@ Coverage was measured on 2026-08-27 and was far narrower than a clean `--verify`
 | | **Curated** (`manifest.mjs`) | **File-backed** (`sources.mjs`) |
 |---|---|---|
 | Content | a human-authored digest | the file itself, read at sync time |
-| Count | 74 entries | 694 files → ~1,200 chunks |
+| Count | 74 entries | 1,110 files as of 2026-11-07 (`--verify` prints the current count) |
 | Retrieval | better — dense, deliberate prose | good; raw prose embeds less cleanly |
-| Drift | **possible** — needs `digestedAt` and re-authoring | **impossible by construction** |
+| Drift | **replaced by the source file** when the source is newer | **impossible by construction** |
 | Adding a file | hand-write an entry | nothing; it is picked up next run |
 
-**Use curated for what carries the most weight** — status, system map, ADRs, plans, memory. **Rules cover the long tail**, where the cost of hand-authoring exceeds the retrieval gain. A file matched by both is left to the curated entry; the sync dedupes on path.
+**Use curated for what carries the most weight** — status, system map, ADRs, plans, memory. **Rules cover the long tail**, where the cost of hand-authoring exceeds the retrieval gain. A file matched by both is left to the curated entry; the sync dedupes on path. Command Center's `context/`, `decisions/` and `plans/` have rules too, so a new plan or ADR is indexed on the next run and can be promoted to a digest later.
+
+**Rows are never removed when a source disappears.** `--verify` lists them as `DB ORPHAN`, and removing them is a deliberate manual step.
 
 ### How the rules work
 

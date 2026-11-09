@@ -13,7 +13,7 @@
 //   node scripts/brain-sync.mjs --batch=A        sync one batch (A|B|C, by sourceSlug prefix convention below)
 //   node scripts/brain-sync.mjs --slug=user-profile   sync a single entry
 //   node scripts/brain-sync.mjs --dry-run        compute + embed, print, write nothing
-//   node scripts/brain-sync.mjs --verify      manifest completeness + digest drift + coverage report
+//   node scripts/brain-sync.mjs --verify      manifest completeness + digest drift + database parity + coverage report
 //   node scripts/brain-sync.mjs --rule=cc-output   sync one sources.mjs rule
 //   node scripts/brain-sync.mjs --curated-only     manifest digests only, skip file-backed rules
 //   node scripts/brain-sync.mjs --force            re-embed everything, ignoring the unchanged-skip
@@ -243,6 +243,21 @@ function isDigestStale(entry) {
   return mtime > authored;
 }
 
+// A digest older than its source is a claim the source has since moved past, so serve
+// the source itself until someone re-authors the digest. --verify reported this drift
+// for months and nothing acted on it: 12 of 74 digests had drifted again by 2026-11-07,
+// the strategy digest among them, 75 days behind. Bumping digestedAt restores the digest.
+function withDigestFallback(entry) {
+  if (!isDigestStale(entry)) return entry;
+  const path = resolveSourcePath(entry).replace(/\\/g, "/");
+  try {
+    if (!statSync(path).isFile()) return entry;
+  } catch {
+    return entry;
+  }
+  return { ...entry, path, strategy: "file", digestSuperseded: true };
+}
+
 function loadEnv() {
   const envPath = join(REPO_ROOT, ".env");
   if (!existsSync(envPath)) {
@@ -334,8 +349,10 @@ async function upsertThought(entry, env) {
       digestedAt: entry.digestedAt || null,
       sourceMtime: mtime ? mtime.toISOString() : null,
       // A file-backed row is read from disk every run, so it cannot drift by
-      // construction — false, never null, and never true.
-      digestStale: entry.strategy === "file" ? false : isDigestStale(entry),
+      // construction. A superseded digest is also served from disk, but its digest
+      // really is stale, so it stays true to keep the re-authoring queue queryable.
+      digestStale: entry.strategy === "file" && !entry.digestSuperseded ? false : isDigestStale(entry),
+      digestSuperseded: Boolean(entry.digestSuperseded),
       sourceGroup: entry.sourceGroup || entry.sourceSlug,
       contentHash: entry.contentHash || null,
       chunk: entry.chunks > 1 ? `${entry.chunk}/${entry.chunks}` : null,
@@ -375,9 +392,13 @@ async function patchEmbedding(id, embedding, env) {
   }
 }
 
+function curatedEntries() {
+  return manifest.map((e) => withDigestFallback({ ...e, ruleId: "curated" }));
+}
+
 function selectEntries() {
   // Curated digests first, then everything the sources.mjs rules expand to.
-  let entries = [...manifest.map((e) => ({ ...e, ruleId: "curated" })), ...(flags.curatedOnly ? [] : expandSources())];
+  let entries = [...curatedEntries(), ...(flags.curatedOnly ? [] : expandSources())];
   if (flags.slug) entries = entries.filter((e) => e.sourceSlug === flags.slug);
   else if (flags.rule) entries = entries.filter((e) => e.ruleId === flags.rule);
   else if (flags.batch) {
@@ -454,7 +475,7 @@ async function runSync() {
       // Materialize first: reading and chunking is local and cheap, and the resulting
       // hash is what decides whether the expensive part (embedding) runs at all.
       const parts = materialize(entry);
-      const hash = contentHash(parts.map((p) => p.content).join(" "));
+      const hash = contentHash(parts.map((p) => p.content).join("\u0000"));
       const prior = indexState.get(entry.sourceSlug);
 
       if (!flags.force && prior?.ok && prior.hash === hash && prior.seen === parts.length) {
@@ -490,7 +511,95 @@ async function runSync() {
     `\nbrain-sync summary: ${ok} ok, ${failed} failed, ${skipped} unchanged (skipped), ` +
       `${entries.length} total — ${rows} row(s) written.`
   );
+  const superseded = entries.filter((e) => e.digestSuperseded).length;
+  if (superseded > 0) console.log(`${superseded} drifted digest(s) served from their source file.`);
   if (failed > 0) process.exitCode = 1;
+}
+
+// Does the database match what a sync would write right now?
+//
+// Compares content, not contentHash: editing a row through update_thought changes its
+// content and leaves its contentHash alone, so a hash comparison cannot see that. It
+// downloads every synced row's text, which is why --verify does this and the scheduled
+// sync does not.
+async function checkDatabaseParity() {
+  const env = loadEnv();
+  const rows = [];
+  const PAGE = 1000;
+  try {
+    for (let offset = 0; ; offset += PAGE) {
+      const res = await fetch(
+        `${env.SUPABASE_URL}/rest/v1/thoughts?select=content,metadata&metadata->>sourceSlug=not.is.null&order=id.asc`,
+        {
+          headers: {
+            apikey: env.SUPABASE_SECRET_KEY,
+            Authorization: `Bearer ${env.SUPABASE_SECRET_KEY}`,
+            Range: `${offset}-${offset + PAGE - 1}`,
+          },
+        }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const page = await res.json();
+      rows.push(...page);
+      if (page.length < PAGE) break;
+    }
+  } catch (err) {
+    console.log(`\nDatabase parity: NOT CHECKED — could not read the database (${err.message}).`);
+    return;
+  }
+
+  const expected = new Map();
+  const groups = new Set();
+  for (const entry of [...curatedEntries(), ...expandSources()]) {
+    groups.add(entry.sourceSlug);
+    try {
+      for (const part of materialize(entry)) expected.set(part.sourceSlug, part.content);
+    } catch (err) {
+      console.log(`  UNREADABLE: ${entry.sourceSlug} — ${err.message}`);
+    }
+  }
+
+  const seen = new Set();
+  const drift = [];
+  const extra = [];
+  const orphanGroups = new Map();
+  let newestSync = "";
+  for (const { content, metadata: m } of rows) {
+    if (m.syncedAt > newestSync) newestSync = m.syncedAt;
+    const group = m.sourceGroup || m.sourceSlug;
+    if (!groups.has(group)) {
+      const orphan = orphanGroups.get(group) || { rows: 0, file: m.sourceFile };
+      orphan.rows++;
+      orphanGroups.set(group, orphan);
+    } else if (!expected.has(m.sourceSlug)) {
+      extra.push(m.sourceSlug);
+    } else {
+      seen.add(m.sourceSlug);
+      if (expected.get(m.sourceSlug) !== content) drift.push(m.sourceSlug);
+    }
+  }
+  const missing = [...expected.keys()].filter((slug) => !seen.has(slug));
+
+  const report = (label, items) => {
+    for (const item of items.slice(0, 25)) console.log(`  ${label}: ${item}`);
+    if (items.length > 25) console.log(`  ... and ${items.length - 25} more ${label}`);
+  };
+  console.log("");
+  report("DB DRIFT", drift);
+  report("DB MISSING", missing);
+  report("DB EXTRA CHUNK", extra);
+  report("DB ORPHAN", [...orphanGroups].map(([g, o]) => `${g} (${o.rows} row(s)) — ${o.file}`));
+  console.log(
+    `Database parity: ${rows.length} synced row(s) checked against ${expected.size} expected — ` +
+      `${drift.length} differ, ${missing.length} missing, ${extra.length} extra, ` +
+      `${orphanGroups.size} orphaned source(s). Newest write: ${newestSync || "none"}.`
+  );
+  if (drift.length || missing.length || extra.length) {
+    console.log("Differences mean the next sync has work to do, or a row was edited outside the sync.");
+  }
+  if (orphanGroups.size) {
+    console.log("Orphans are rows whose source is no longer in scope. The sync never removes them.");
+  }
 }
 
 function walkMarkdown(dir, base = dir, results = []) {
@@ -508,7 +617,7 @@ function walkMarkdown(dir, base = dir, results = []) {
   return results;
 }
 
-function runVerify() {
+async function runVerify() {
   // Scope: Command Center's own context/plans/decisions dirs + the Claude Code memory dir.
   const commandCenterRoot = COMMAND_CENTER_ROOT;
   const memoryRoot = MEMORY_ROOT;
@@ -608,11 +717,13 @@ function runVerify() {
   }
   if (drifted > 0) {
     console.log(
-      "\nA drifted digest means the brain is serving prose written before the source changed.\n" +
-        "Re-running the sync will NOT fix it — rewrite the entry's `content` in manifest.mjs,\n" +
-        "bump its `digestedAt`, then sync."
+      "\nA drifted digest is older than its source, so the sync serves the source file in its\n" +
+        "place. To restore the digest, rewrite the entry's `content` in manifest.mjs, bump its\n" +
+        "`digestedAt`, then sync."
     );
   }
+
+  await checkDatabaseParity();
 
   // Report what the file-backed rules cover, and then say plainly what nothing covers.
   // A clean run must never be readable as "everything is indexed".
@@ -638,7 +749,7 @@ function runVerify() {
 }
 
 if (flags.verify) {
-  runVerify();
+  await runVerify();
 } else {
   runSync();
 }

@@ -20,6 +20,7 @@
 import { readFileSync, existsSync, appendFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { waitForDns } from "./lib/network.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -58,6 +59,13 @@ function loadEnv() {
 
 async function main() {
   const env = loadEnv();
+
+  const network = await waitForDns(new URL(env.SUPABASE_URL).hostname);
+  if (!network.ok) {
+    throw new Error(`no DNS after ${Math.round(network.waitedMs / 1000)}s (${network.error}) — machine offline?`);
+  }
+  if (network.waitedMs > 5000) log(`INFO  waited ${Math.round(network.waitedMs / 1000)}s for the network`);
+
   const started = Date.now();
 
   // Cheapest possible authenticated read that still touches Postgres: one id, one row.
