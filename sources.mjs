@@ -58,7 +58,17 @@ export const GLOBAL_EXCLUDES = [
   // Test fixtures. Folio's are fake plans written to look like the real corpus (one is a
   // generated 155 KB "Plan 0003"), so indexing them would surface invented plans in search.
   /[\\/]fixtures[\\/]/,
+  // project-hub's autonomous-run transcripts. The two in Ben's Trees say only "How can I help
+  // you with the Ben's Trees project?", yet outranked the real answer to "why is Ben's Trees
+  // paused?" because they repeat the project's name. project-hub outputs are not evidence
+  // (Command Center system-map, 2026-09-02).
+  /[\\/]hub-runs[\\/]/,
 ];
+
+// GlensToolkit boilerplate copied into each repo it scaffolds. The toolkit's own copy is
+// indexed; the others are byte-identical, and each extra copy took a search slot from
+// something specific to that repo. Applied to every rule except repo-glenstoolkit.
+const TOOLKIT_COPIES = [/^shell-aliases\.md$/];
 
 // Claude Code memory directories that must NOT be indexed, by project-dir name.
 //
@@ -93,6 +103,12 @@ export const sources = [
     exclude: [
       // Identical to the PSC repo's docs/proposal.md (graduated 2026-11-10).
       /^proposal-public-service-center-2026-06-06\.md$/,
+      // Identical to the PSC repo's docs/discovery-transcript.md (graduated 2026-11-10).
+      /^discovery\/psc-guide-2026-06-05-1844\.md$/,
+      // The Fable run's digest/ is a machine-made file inventory (paths, sizes, reference
+      // counts). It names every project, so it surfaced for questions it cannot answer. The
+      // run's findings (00-07, one level up) stay indexed.
+      /^fable-portfolio-run\/digest\//,
     ],
   },
   {
@@ -120,7 +136,8 @@ export const sources = [
     slugPrefix: "cc-root-",
     type: "reference",
     tags: ["command-center", "workspace"],
-    note: "HARVEST.md, README.md, shell-aliases.md. CLAUDE.md / status.md / SESSION-SUMMARY.md are curated and dedupe out.",
+    note: "HARVEST.md, README.md. CLAUDE.md / status.md / SESSION-SUMMARY.md are curated and dedupe out.",
+    exclude: TOOLKIT_COPIES,
   },
   // Plans, ADRs and context used to need a hand-written manifest entry each, and that
   // step stopped happening: by 2026-11-07, plans 0019-0031 and ADRs 0009-0010 were
@@ -177,25 +194,41 @@ export const sources = [
     { key: "psc", dir: "D:/Websites/Public Service Center", tags: ["psc", "client", "ticketing"] },
     { key: "bens-trees", dir: "D:/Websites/Ben's Trees", tags: ["bens-trees", "client"] },
     { key: "icumd", dir: "D:/Websites/ICUMD Clone Designer", tags: ["icumd", "portfolio", "track-a"] },
-    { key: "field-shader", dir: "D:/Repos/Field-Shader", tags: ["field-shader", "webgl", "shader"] },
+    // outputs/verify/ holds one timestamped test-run log per run (167 by 2026-11-10, 13% of
+    // all sources). The repo's docs/STATE.md carries the current verification state.
+    { key: "field-shader", dir: "D:/Repos/Field-Shader", tags: ["field-shader", "webgl", "shader"], exclude: [/^outputs\/verify\//] },
     { key: "tweaker", dir: "D:/Repos/Tweaker", tags: ["tweaker", "front-end", "tooling"] },
-    { key: "nelson-bi", dir: "D:/Repos/Nelson BI", tags: ["nelson-bi", "data", "lead-pipeline"] },
+    { key: "nelson-bi", dir: "D:/Repos/Nelson BI", tags: ["nelson-bi", "data", "lead-pipeline"], exclude: [/^plans\/_generic-templates-superseded\//] },
     { key: "icu-tools", dir: "D:/Repos/icu-tools", tags: ["icu-tools", "delivery-suite"] },
-    { key: "project-hub", dir: "D:/Repos/Integrations and Project Management", tags: ["project-hub", "agency"] },
+    // MASTER_CONTEXT.md is an export of project-hub's database from March 2026 (unused since
+    // July). Its stale status table ranked first for "why is Ben's Trees paused?".
+    { key: "project-hub", dir: "D:/Repos/Integrations and Project Management", tags: ["project-hub", "agency"], exclude: [/^project-hub\/MASTER_CONTEXT\.md$/] },
     { key: "glenstoolkit", dir: "D:/Repos/GlensToolkit", tags: ["glenstoolkit", "toolkit"] },
     { key: "vps-infra", dir: "D:/Repos/vps-infra", tags: ["vps-infra", "hosting"] },
     { key: "permissible-lab", dir: "D:/Repos/permissible-lab", tags: ["permissible-lab", "audio", "dsp"] },
-    { key: "drumgen", dir: "D:/Repos/DrumGen", tags: ["drumgen", "audio", "midi"] },
+    // plans/01-08 are GlensToolkit's milestone templates, byte-identical and never filled in.
+    { key: "drumgen", dir: "D:/Repos/DrumGen", tags: ["drumgen", "audio", "midi"], exclude: [/^plans\/0\d-[a-z-]+\.md$/] },
     { key: "icu-relay", dir: "D:/Repos/icu-relay", tags: ["icu-relay", "telegram", "remote-control"] },
     // Folio's context/ files are unfilled GlensToolkit templates, byte-identical to the
     // toolkit's own, which are already indexed under repo-glenstoolkit.
     { key: "folio", dir: "D:/Repos/Folio", tags: ["folio", "markdown-reader", "electron"], exclude: [/^context\//] },
     { key: "icu-platform", dir: "D:/Repos/icu-platform", tags: ["icu-platform", "chassis", "modules"] },
+    // This repo, but only its fork-local files: how the brain is run, checked and repaired.
+    // Everything else here is upstream Open Brain content that describes other people's setups.
+    // Added 2026-11-10 so a session on the laptop or in claude.ai can read the playbook.
+    // docs/golden-queries.md is left out on purpose: it holds the test questions verbatim, so
+    // indexing it made every test question match the test file.
+    {
+      key: "icu-brain",
+      dir: "D:/Repos/icu-brain",
+      tags: ["icu-brain", "open-brain", "maintenance"],
+      exclude: [/^(?!CLAUDE\.md$|docs\/(architecture|maintenance-playbook)\.md$)/],
+    },
   ].map((r) => ({
     id: `repo-${r.key}`,
     label: `Repo — ${r.dir.split("/").pop()}`,
     root: r.dir,
-    exclude: r.exclude,
+    exclude: [...(r.exclude ?? []), ...(r.key === "glenstoolkit" ? [] : TOOLKIT_COPIES)],
     slugPrefix: `r-${r.key}-`,
     type: "reference",
     tags: ["repo-content", ...r.tags],

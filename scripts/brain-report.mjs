@@ -48,7 +48,6 @@ const NOT_INDEXED_ON_PURPOSE = {
   Whetstone: "Excluded permanently (ADR 0007)",
   "image-visualizer": "386 files would swamp search",
   "relay-sandbox": "A test copy of icu-relay",
-  "icu-brain": "This repo; mostly upstream Open Brain content",
 };
 
 // ---------------------------------------------------------------------------
@@ -333,16 +332,32 @@ async function embed(text) {
 // Ask each golden question the way search_thoughts does, and record where the expected
 // source ranked. A pass is a top-3 hit, the bar docs/golden-queries.md sets.
 async function runGolden() {
+  // Same path as the MCP search tools: hybrid search, or vector-only if the hybrid function
+  // is not installed. The mode is reported so a fallback can't pass unnoticed.
+  const rpc = async (name, body) => {
+    const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${name}`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+    return res.json();
+  };
+  let mode = "hybrid";
   const results = [];
   for (const q of goldenQueries()) {
     try {
-      const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/match_thoughts`, {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ query_embedding: await embed(q.question), match_threshold: 0, match_count: 10, filter: {} }),
-      });
-      if (!res.ok) throw new Error(`match_thoughts: HTTP ${res.status}`);
-      const hits = (await res.json()).map((h) => ({ group: h.metadata?.sourceGroup || h.metadata?.sourceSlug || "(ad hoc note)", sim: h.similarity }));
+      const query_embedding = await embed(q.question);
+      let raw;
+      if (mode === "hybrid") {
+        try {
+          raw = await rpc("hybrid_match_thoughts", { query_text: q.question, query_embedding, match_count: 10, filter: {} });
+        } catch {
+          mode = "vector";
+        }
+      }
+      if (mode === "vector") raw = await rpc("match_thoughts", { query_embedding, match_threshold: 0, match_count: 10, filter: {} });
+      const hits = raw.map((h) => ({ group: h.metadata?.sourceGroup || h.metadata?.sourceSlug || "(ad hoc note)", sim: h.similarity }));
       const idx = hits.findIndex((h) => q.expected.includes(h.group));
       results.push({ ...q, rank: idx < 0 ? null : idx + 1, sim: idx < 0 ? null : hits[idx].sim, top: hits[0] });
     } catch (err) {
@@ -354,8 +369,8 @@ async function runGolden() {
     const lines = readFileSync(GOLDEN_HISTORY, "utf8").trim().split("\n");
     previous = JSON.parse(lines[lines.length - 1]);
   } catch { /* first run */ }
-  appendFileSync(GOLDEN_HISTORY, JSON.stringify({ at: now.toISOString(), ranks: Object.fromEntries(results.map((r) => [r.n, r.rank])) }) + "\n");
-  return { results, previous };
+  appendFileSync(GOLDEN_HISTORY, JSON.stringify({ at: now.toISOString(), mode, ranks: Object.fromEntries(results.map((r) => [r.n, r.rank])) }) + "\n");
+  return { results, previous, mode };
 }
 
 // ---------------------------------------------------------------------------
@@ -452,7 +467,7 @@ function render(d) {
   if (golden) {
     const prev = golden.previous?.ranks ?? {};
     search = section("search", "Search checks",
-      `The questions in <code>docs/golden-queries.md</code>, asked the way any connected AI asks them. Each passes when the source that should answer it ranks in the top 3. A drop from the last run is how a stale or duplicated document shows up.`,
+      `The questions in <code>docs/golden-queries.md</code>, asked the way any connected AI asks them (${golden.mode === "hybrid" ? "hybrid keyword and meaning search" : "<strong>meaning-only search: the hybrid search function is not installed</strong>"}). Each passes when a source that answers it ranks in the top 3. A drop from the last run is how a stale or duplicated document shows up.`,
       table(["#", "Question", "Expected source rank", "Change", "Top result instead"], golden.results.map((r) => {
         const level = r.rank && r.rank <= 3 ? "good" : r.rank ? "warning" : "critical";
         const before = prev[r.n];

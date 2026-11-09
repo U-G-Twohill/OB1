@@ -17,6 +17,7 @@
 //   node scripts/brain-sync.mjs --rule=cc-output   sync one sources.mjs rule
 //   node scripts/brain-sync.mjs --curated-only     manifest digests only, skip file-backed rules
 //   node scripts/brain-sync.mjs --force            re-embed everything, ignoring the unchanged-skip
+//   node scripts/brain-sync.mjs --prune-limit=200  allow a reviewed cleanup of more than 50 orphaned sources
 
 
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
@@ -236,8 +237,9 @@ async function fetchIndexState(env) {
 //   1. A rule whose root folder is missing (a repo moved, a drive not mounted) keeps its
 //      rows. Its files vanished from the scan, but they were not taken out of scope.
 //   2. More than MAX_PRUNE orphaned sources at once prunes nothing. That many at once
-//      looks like a mistake, not housekeeping; prune it by hand after looking.
-const MAX_PRUNE = 50;
+//      looks like a mistake, not housekeeping. After reviewing them with --verify, run the
+//      sync once with --prune-limit=N to allow a deliberate larger cleanup.
+const MAX_PRUNE = Number((args.find((a) => a.startsWith("--prune-limit=")) || "=50").split("=")[1]);
 
 async function pruneOrphans(indexState, entries, env) {
   const inScope = new Set(entries.map((e) => e.sourceSlug));
@@ -256,7 +258,7 @@ async function pruneOrphans(indexState, entries, env) {
     console.log(
       `
 ${orphans.length} orphaned sources found, over the limit of ${MAX_PRUNE}: none pruned. ` +
-        `Run --verify to see them.`
+        `Review them with --verify, then run once with --prune-limit=${orphans.length} if they should go.`
     );
     return 0;
   }

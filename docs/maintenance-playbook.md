@@ -269,6 +269,42 @@ grep -rlEi 'INSERT INTO|customer_email|buyer_email|attendee|ticket_holder' <root
 
 ---
 
+## Search quality (2026-11-10)
+
+The brain's job is that any machine or AI gets the right answer to the first question. The
+measure is the 32 golden questions in `docs/golden-queries.md`, run daily by the brain report.
+Two things moved it from 11 of 15 passing to 29 of 32 on the same day, and a third is pending.
+
+**1. Noise out.** Generated files ranked above real answers because they repeat project names:
+project-hub run transcripts (one said only "How can I help you with the Ben's Trees project?"),
+a March export of project-hub's database, the Fable run's file inventories, 167 Field-Shader
+test-run logs, template boilerplate copied into many repos, and graduated Command Center copies.
+Each exclusion is in `sources.mjs` with its reason. The brain went from 1,255 sources to 1,043,
+and cross-project copies from 75 to 6. **When a search check slips, look at what ranked above
+the answer before rewriting the answer.**
+
+**2. Expected sources counted honestly.** A question passes when any source that states the
+answer ranks in the top 3. Those sources are found by searching the files for the answer, never
+by reading search results, so the test can't be tuned to the search.
+
+**3. Hybrid search (pending install).** Meaning-only search misses questions that hinge on exact
+names and dates. `docs/sql/2026-11-10-hybrid-search.sql` adds a keyword index and a
+`hybrid_match_thoughts` function that fuses keyword and vector rankings (reciprocal rank fusion,
+k = 60, untuned). Offline it passed 32 of 32 against 29 for vector-only. The MCP tools
+(`supabase/functions/open-brain-mcp/index.ts`, `searchThoughts`) call it and fall back to
+`match_thoughts` on any error, and the report says which mode ran. To install:
+
+1. Supabase dashboard → SQL editor → paste and run the SQL file. It only adds a column, an
+   index and a function, and is safe to re-run.
+2. `npx supabase@2 login`, then from this repo
+   `npx supabase@2 functions deploy open-brain-mcp --project-ref <ref>` (the ref is the
+   subdomain of `SUPABASE_URL`).
+3. `node scripts/brain-report.mjs`; the search section should say "hybrid".
+
+**The deployed function's source is not in git.** `supabase/` is gitignored upstream, so
+`supabase/functions/open-brain-mcp/index.ts` exists only on this desktop. Back it up before
+replacing it from a fresh upstream clone.
+
 ## Troubleshooting
 
 - **401 errors from a client:** the access key in the URL/header doesn't match what's stored in Supabase secrets — check both sides.
