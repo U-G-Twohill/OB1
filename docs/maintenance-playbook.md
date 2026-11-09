@@ -287,19 +287,37 @@ the answer before rewriting the answer.**
 answer ranks in the top 3. Those sources are found by searching the files for the answer, never
 by reading search results, so the test can't be tuned to the search.
 
-**3. Hybrid search (pending install).** Meaning-only search misses questions that hinge on exact
-names and dates. `docs/sql/2026-11-10-hybrid-search.sql` adds a keyword index and a
-`hybrid_match_thoughts` function that fuses keyword and vector rankings (reciprocal rank fusion,
-k = 60, untuned). Offline it passed 32 of 32 against 29 for vector-only. The MCP tools
-(`supabase/functions/open-brain-mcp/index.ts`, `searchThoughts`) call it and fall back to
-`match_thoughts` on any error, and the report says which mode ran. To install:
+**3. Hybrid search (installed 2026-11-10).** Meaning-only search misses questions that hinge on
+exact names ("icu-relay", "2026-07-02"). `docs/sql/2026-11-10-hybrid-search.sql` adds a keyword
+index and `hybrid_match_thoughts`, which fuses keyword and vector rankings (reciprocal rank
+fusion, k = 60, untuned). Both MCP search tools call it through `searchThoughts` in
+`supabase/functions/open-brain-mcp/index.ts` and fall back to `match_thoughts` on any error; the
+report says which mode ran. Result: **30 of 32** against 29 for vector-only, and the two methods
+fail on different questions.
 
-1. Supabase dashboard → SQL editor → paste and run the SQL file. It only adds a column, an
-   index and a function, and is safe to re-run.
-2. `npx supabase@2 login`, then from this repo
-   `npx supabase@2 functions deploy open-brain-mcp --project-ref <ref>` (the ref is the
-   subdomain of `SUPABASE_URL`).
-3. `node scripts/brain-report.mjs`; the search section should say "hybrid".
+Three lessons, each found by measuring before trusting:
+
+- **Keyword ranking needs rarity weighting.** Postgres's `ts_rank_cd` weighs every word the same,
+  so "icu" (in most documents) counted as much as "relay". That version scored **18 of 32**,
+  worse than vector-only, and was never deployed. The keyword score now multiplies each word's
+  `ts_rank` by its inverse document frequency.
+- **Plan the query with its real values.** The same query took 0.2 s standalone and 1–24 s as a
+  plain SQL function, over the 8 s statement timeout, because the function body was planned with
+  placeholders. It now runs through PL/pgSQL `EXECUTE … USING` with MATERIALIZED CTEs:
+  60–400 ms.
+- **Don't threshold what hybrid found.** Filtering every result by the 0.3 similarity threshold
+  dropped keyword-found sources. The top 3 fused results are now always returned, and the
+  threshold applies only beyond them.
+
+**Re-installing** (safe to re-run): `npx supabase@2 db query --linked --project-ref <ref> -f
+docs/sql/2026-11-10-hybrid-search.sql`, then `npx supabase@2 functions deploy open-brain-mcp
+--project-ref <ref> --use-api`. Both need `npx supabase@2 login` in an interactive terminal
+first (it cannot log in from inside Claude Code). The ref is the subdomain of `SUPABASE_URL`.
+
+**The two still failing**, both content rather than search: "when did PSC open?" is outranked by
+the 2026-07-02 hand-captured "setup complete" note, which still says PSC is "chasing production
+cut-over gates"; and "what is the next piece of work on PSC?" finds its answers at #5–#8 behind
+broader PSC memories.
 
 **The deployed function's source is not in git.** `supabase/` is gitignored upstream, so
 `supabase/functions/open-brain-mcp/index.ts` exists only on this desktop. Back it up before

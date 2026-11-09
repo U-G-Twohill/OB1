@@ -72,7 +72,7 @@ verbatim, so indexing it made every question match this file.
 | 26 | How do I retire a Command Center planning folder once the project has its own repo? | `cc-reference-graduation` / `cc-context-system-map` |
 | 27 | What went wrong with the PSC two-factor login? | `r-psc-docs-2fa-gate-loop-diagnostics` / `r-psc-docs-build-history` |
 | 28 | What is the rule before changing anything on PSC production? | `mem-d-websites-public-service-center-staging-first-uriah-tests-before-live` / `r-psc-docs-state` / `r-psc-claude` / `r-psc-docs-session-protocols` / `memory-project-public-service-centre` |
-| 29 | Can I trust project-hub health scores and statuses? | `cc-decisions-0009-project-hub-disposition` / `cc-context-system-map` / `r-project-hub-project-hub-docs-state` / `repo-project-hub` |
+| 29 | Can I trust project-hub health scores and statuses? | `cc-decisions-0009-project-hub-disposition` / `cc-context-system-map` / `r-project-hub-project-hub-docs-state` / `repo-project-hub` / `memory-project-hub-state-tracking` |
 | 30 | When should I spend Fable on a problem? | `memory-feedback-frontier-playbook-pattern` / `memory-feedback-usage-budget-no-fanout` |
 | 31 | How is the Open Brain sync kept healthy? | `r-icu-brain-docs-maintenance-playbook` / `r-icu-brain-claude` / `memory-project-open-brain-migration` / `cc-plan-0013-brain-migration` |
 | 32 | Where is the ICUMD site hosted? | `mem-d-websites-icumd-clone-designer-hosting-target` / `repo-vps-infra` / `cc-output-icumd-handoff-prompt` / `cc-output-full-audit-2026-07-02` / `cc-status-current` |

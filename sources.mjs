@@ -105,6 +105,9 @@ export const sources = [
       /^proposal-public-service-center-2026-06-06\.md$/,
       // Identical to the PSC repo's docs/discovery-transcript.md (graduated 2026-11-10).
       /^discovery\/psc-guide-2026-06-05-1844\.md$/,
+      // The June prompt that started PSC's build session. Superseded by the PSC repo's own
+      // docs/STATE.md, but it outranked it for "when did PSC open?" (graduated 2026-11-10).
+      /^psc-build-kickoff-handoff\.md$/,
       // The Fable run's digest/ is a machine-made file inventory (paths, sizes, reference
       // counts). It names every project, so it surfaced for questions it cannot answer. The
       // run's findings (00-07, one level up) stay indexed.
