@@ -61,6 +61,14 @@ cat logs/last-sync.json           # did the last sync succeed, and what failed i
 
 **Network failures (added 2026-11-07).** `StartWhenAvailable` runs a missed task the moment the machine wakes, often before DNS works, and that was the cause of the wake-time `ENOTFOUND` failures. Both scripts now wait up to 5 minutes for DNS. The sync also retries up to 3 attempts, but only on network-shaped failures, because a bad entry would just fail the same way again. `attempts` and `waitedMs` show when this happened. A task killed by Windows or a closed console is still lost until the next day's run, but it is now reported.
 
+**Pull, prune, report (added 2026-11-10).** The scheduled run now does three things around the sync:
+
+1. **Pulls first** (`scripts/lib/repo-pull.mjs`). Each indexed repo with no uncommitted changes to tracked files gets `git pull --ff-only`, so laptop work that was pushed reaches the brain the same day. A repo with local changes is only fetched, never pulled, and its `behind` count is recorded. A repo whose history has diverged fails the pull and is reported. No prompts: a repo that needs credentials fails fast. The results are in `repos` in `last-sync.json`.
+2. **Prunes orphans.** A full sync now deletes rows whose source has left scope: a deleted or renamed file, a dropped manifest entry, a new exclude, or a graduated folder. It keeps the rows of any rule whose root folder is missing (a moved repo or an unmounted drive), and it prunes nothing if more than 50 sources would go at once. `entries.pruned` counts them. A `--rule`, `--slug`, `--batch` or `--curated-only` run never prunes, because it can't see the whole scope.
+3. **Writes the brain report**, `logs/brain-report.html`. Open it in a browser. It covers health, the golden queries re-run with rank changes, what the brain knows by project and folder, activity by month, files changed this week, near-identical copies across projects, graduated folders, and active repos nothing indexes. Run it by hand with `node scripts/brain-report.mjs` (add `--no-golden` to skip the 15 embedding calls). Embeddings are cached in `logs/report-cache.json` by row id, so a daily run downloads only what changed. Each golden-query run is appended to `logs/golden-history.jsonl`. A report failure is logged and does not fail the sync.
+
+**Graduation (added 2026-11-10).** When a project planned in Command Center moves to its own repo, its Command Center folder is frozen with a `GRADUATED.md` rather than deleted. The sync skips any folder holding that file (`walkFiles` in `scripts/lib/entries.mjs`), and the next full sync prunes its rows. A single loose file goes in the `cc-output` rule's `exclude` list instead. The whole workflow is Command Center `reference/graduation.md`; the ledger is Command Center `context/system-map.md`. The report's **Copies** section is where candidates show up.
+
 **Manage the tasks:**
 
 ```powershell
@@ -72,9 +80,9 @@ Disable-ScheduledTask -TaskName "OpenBrain-Sync"             # pause it
 
 Both use `-StartWhenAvailable`, so a missed run (machine off at 09:00) fires when the machine next wakes rather than being skipped.
 
-**Still true, and the reason this is safe to automate:** the automation only ever runs *git → brain*. It never writes back to git and never invents content, so the worst a bad automated run can do is leave the index stale — the failure it is there to prevent — not corrupt a source. That asymmetry is what makes silent operation acceptable here and would not make it acceptable in the other direction.
+**Still true, and the reason this is safe to automate:** the automation only ever runs *git → brain*. It never commits or pushes, its only git write is a fast-forward pull of a clean checkout, and it never invents content, so the worst a bad automated run can do is leave the index stale — the failure it is there to prevent — not corrupt a source. That asymmetry is what makes silent operation acceptable here and would not make it acceptable in the other direction.
 
-**One caveat worth knowing.** The tasks are registered on the desktop only — the laptop has no equivalent, so don't assume a sync happened because you were working on the laptop. Sources are read from the desktop's own disk, so work pushed from the laptop reaches the brain only after the desktop checkout pulls it.
+**One caveat worth knowing.** The tasks are registered on the desktop only — the laptop has no equivalent, so don't assume a sync happened because you were working on the laptop. Sources are read from the desktop's own disk. Since 2026-11-10 the scheduled run pulls clean repos first, so work pushed from the laptop arrives the same day, except in a repo with uncommitted changes on the desktop. The report's Repos table lists those with how far behind they are. Unpushed laptop work never arrives: push it.
 
 ---
 

@@ -87,6 +87,13 @@ export const sources = [
     type: "reference",
     tags: ["command-center", "outputs"],
     note: "Research, audits, vision docs, the Fable portfolio run, Friday-triage logs, the tooling backlog.",
+    // Graduated work. A folder graduates by holding a GRADUATED.md, which the walker skips
+    // on its own; a loose file has no folder of its own to mark, so it is listed here.
+    // Workflow: Command Center reference/graduation.md. Ledger: context/system-map.md.
+    exclude: [
+      // Identical to the PSC repo's docs/proposal.md (graduated 2026-11-10).
+      /^proposal-public-service-center-2026-06-06\.md$/,
+    ],
   },
   {
     id: "cc-reference",

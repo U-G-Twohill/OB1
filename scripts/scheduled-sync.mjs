@@ -17,14 +17,19 @@
 // place, and that file then says the opposite of what happened. The next run reads a
 // leftover "running" and reports the interruption.
 //
+// Before syncing it pulls each indexed repo that has no local changes (scripts/lib/repo-pull.mjs),
+// so work pushed from the laptop reaches the brain. After syncing it rebuilds the brain
+// report (scripts/brain-report.mjs). A failure in either is logged and does not fail the sync.
+//
 // Usage:
-//   node scripts/scheduled-sync.mjs        run the sync, log + record status
+//   node scripts/scheduled-sync.mjs        pull, sync, report; log + record status
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { waitForDns, isNetworkFailure } from "./lib/network.mjs";
+import { pullRepos } from "./lib/repo-pull.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -92,9 +97,9 @@ function logChildOutput(out) {
   }
 }
 
-function runSync() {
+function runScript(name) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(__dirname, "brain-sync.mjs")], {
+    const child = spawn(process.execPath, [join(__dirname, name)], {
       cwd: REPO_ROOT,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -131,12 +136,22 @@ if (host) {
   if (!network.ok) logLine(`WARN  still no DNS for ${host} (${network.error}); trying anyway`);
 }
 
+let repos = [];
+try {
+  repos = pullRepos();
+  for (const r of repos.filter((r) => r.result !== "current" && !(r.result === "dirty" && !r.behind))) {
+    logLine(`PULL  ${r.repo}: ${r.result}${r.behind ? ` (${r.behind} commit(s) behind)` : ""}${r.detail ? ` — ${r.detail}` : ""}`);
+  }
+} catch (err) {
+  logLine(`WARN  repo pull step failed: ${err.message}`);
+}
+
 let attempts = 0;
 let code;
 let out;
 for (;;) {
   attempts++;
-  ({ code, out } = await runSync());
+  ({ code, out } = await runScript("brain-sync.mjs"));
   logChildOutput(out);
   if (code === 0 || attempts >= MAX_ATTEMPTS || !isNetworkFailure(out)) break;
   logLine(`WARN  attempt ${attempts} hit a network failure; retrying in ${RETRY_DELAY_MS / 1000}s`);
@@ -155,6 +170,7 @@ const failed = num(/brain-sync summary: \d+ ok, (\d+) failed/);
 const skipped = num(/(\d+) unchanged \(skipped\)/);
 const total = num(/(\d+) total/);
 const rows = num(/(\d+) row\(s\) written/);
+const pruned = num(/(\d+) orphaned source\(s\) removed/) ?? 0;
 
 // Any per-entry failure lines, so the status file names what broke rather than just counting it.
 const failures = out
@@ -175,7 +191,8 @@ writeStatus({
   waitedMs,
   lastOkAt: healthy ? finishedAt : lastOkAt,
   interruptedPrevious,
-  entries: { ok, failed, skipped, total, rowsWritten: rows },
+  entries: { ok, failed, skipped, total, rowsWritten: rows, pruned },
+  repos,
   failures,
   // A crash before the summary line has no [FAILED] entries, so keep the end of its
   // output. Without this, the reason survived only in the log.
@@ -192,3 +209,7 @@ if (healthy) {
   logLine(`FAIL  exit=${code} ok=${ok} failed=${failed} total=${total} after ${attempts} attempt(s) — see ${STATUS_FILE}`);
   process.exitCode = 1;
 }
+
+const report = await runScript("brain-report.mjs");
+logChildOutput(report.out);
+if (report.code !== 0) logLine(`WARN  brain report failed (exit ${report.code}); the sync result above stands`);

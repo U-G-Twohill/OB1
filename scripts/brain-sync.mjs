@@ -18,245 +18,19 @@
 //   node scripts/brain-sync.mjs --curated-only     manifest digests only, skip file-backed rules
 //   node scripts/brain-sync.mjs --force            re-embed everything, ignoring the unchanged-skip
 
-import { readFileSync, existsSync } from "node:fs";
-import { readdirSync, statSync } from "node:fs";
+
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { manifest } from "../manifest.mjs";
-import { sources, GLOBAL_EXCLUDES, MEMORY_DIR_EXCLUDES } from "../sources.mjs";
-import { createHash } from "node:crypto";
+import { sources } from "../sources.mjs";
+import {
+  COMMAND_CENTER_ROOT, MEMORY_ROOT, sourceMtime, digestedAtInstant, isDigestStale,
+  expandSources, materialize, contentHash, curatedEntries,
+} from "./lib/entries.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
-
-// Source roots. Hoisted to module scope because both the sync path (to stamp each
-// row with its source's mtime) and the verify path (to detect drift) need them.
-const COMMAND_CENTER_ROOT = process.env.COMMAND_CENTER_ROOT || "D:/Repos/Command Center Plan";
-const MEMORY_ROOT =
-  process.env.CLAUDE_MEMORY_ROOT ||
-  "C:/Users/ugtwo/.claude/projects/D--Repos-Command-Center-Plan/memory";
-
-// A manifest entry's `path` is relative to Command Center, relative to the memory
-// directory, or absolute (the cross-repo CLAUDE.md orientation digests).
-function resolveSourcePath(entry) {
-  const p = entry.path.replace(/\\/g, "/");
-  if (p.startsWith("D:/") || p.startsWith("C:/")) return p;
-  if (p.startsWith("memory/")) return join(MEMORY_ROOT, p.slice("memory/".length));
-  return join(COMMAND_CENTER_ROOT, p);
-}
-
-// The mtime of the file a digest was written from, or null if it is unreadable.
-function sourceMtime(entry) {
-  try {
-    return statSync(resolveSourcePath(entry)).mtime;
-  } catch {
-    return null;
-  }
-}
-
-// When a digest's prose was authored, as a comparable instant.
-//
-// Two accepted forms, deliberately. A bare "YYYY-MM-DD" is what a human types and is
-// read as END of that day — lenient, so it cannot cry wolf, but it therefore cannot
-// see a same-day edit. A full ISO timestamp is exact. Prefer the timestamp when a
-// tool writes the stamp; a same-day edit is not hypothetical, one happened on
-// 2026-08-27 when a concurrent session committed to Command Center mid-sync.
-function digestedAtInstant(entry) {
-  if (!entry.digestedAt) return null;
-  return /^\d{4}-\d{2}-\d{2}$/.test(entry.digestedAt)
-    ? new Date(`${entry.digestedAt}T23:59:59.999Z`)
-    : new Date(entry.digestedAt);
-}
-
-// ---------------------------------------------------------------------------
-// File-backed sources (sources.mjs) — expanded at scan time, read from disk.
-// ---------------------------------------------------------------------------
-
-// text-embedding-3-small accepts 8191 tokens. Markdown with tables and code runs
-// denser than prose, so budget conservatively at ~3k tokens per chunk and overlap a
-// little so a paragraph split across a boundary is still findable from either side.
-const CHUNK_CHARS = 12000;
-const CHUNK_OVERLAP = 400;
-
-function slugify(s) {
-  return s
-    .toLowerCase()
-    .replace(/\.md$/, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 90);
-}
-
-function excluded(fullPath) {
-  const p = fullPath.replace(/\\/g, "/");
-  return GLOBAL_EXCLUDES.some((re) => re.test(p));
-}
-
-// JS strings are UTF-16, so slicing at an arbitrary index can cut an astral character
-// (any emoji) in half and leave a lone surrogate. JSON.stringify emits it happily, but
-// it is invalid JSON and PostgREST rejects the whole request with PGRST102 "Empty or
-// invalid json". A 🔸 in a PSC legal doc is exactly how this was found.
-function safeBoundary(text, idx) {
-  const c = text.charCodeAt(idx - 1);
-  return c >= 0xd800 && c <= 0xdbff ? idx - 1 : idx; // don't end on a high surrogate
-}
-
-// Last line of defence for anything Postgres will refuse to store as text.
-// Two distinct hazards, both found the same way — by a nightly sync failing:
-//
-//   1. Unpaired surrogates, produced by slicing a chunk mid-astral-character.
-//      A 🔸 in a PSC legal doc is how that one was found.
-//   2. NUL (U+0000). Postgres rejects it outright — `22P05: unsupported
-//      Unicode escape sequence` — and unlike a lone surrogate it is present in
-//      the SOURCE FILE, not introduced by chunking. Found 2026-09-07: three
-//      Field-Shader verify outputs each carry one NUL, because WebGL's
-//      getShaderInfoLog() returns a NUL-TERMINATED string and the harness wrote
-//      it into the report verbatim. That failed the scheduled sync every night
-//      from 2026-08-31 to 2026-09-06 with nothing surfacing it.
-//
-// Strip rather than reject: one bad byte in a 40 KB report should cost the byte,
-// not the document. Both return paths of chunkText() pass through here, so this
-// is the single choke point.
-function stripLoneSurrogates(s) {
-  return s
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
-    .replace(/\u0000/g, "");
-}
-
-// Split on paragraph boundaries where possible so chunks stay semantically whole.
-function chunkText(text) {
-  if (text.length <= CHUNK_CHARS) return [stripLoneSurrogates(text)];
-  const chunks = [];
-  let i = 0;
-  while (i < text.length) {
-    let end = Math.min(i + CHUNK_CHARS, text.length);
-    if (end < text.length) {
-      const window = text.slice(i, end);
-      const br = Math.max(window.lastIndexOf("\n\n"), window.lastIndexOf("\n## "));
-      if (br > CHUNK_CHARS * 0.5) end = i + br;
-      end = safeBoundary(text, end);
-    }
-    chunks.push(stripLoneSurrogates(text.slice(i, end).trim()));
-    if (end >= text.length) break;
-    i = safeBoundary(text, Math.max(end - CHUNK_OVERLAP, i + 1));
-  }
-  return chunks.filter((c) => c.length > 0);
-}
-
-function walkFiles(dir, base, out = [], depth = Infinity, level = 0) {
-  if (!existsSync(dir)) return out;
-  let names;
-  try { names = readdirSync(dir); } catch { return out; }
-  for (const name of names) {
-    const full = join(dir, name);
-    if (excluded(full)) continue;
-    let st;
-    try { st = statSync(full); } catch { continue; }
-    if (st.isDirectory()) {
-      if (name.startsWith(".") || level + 1 >= depth) continue;
-      walkFiles(full, base, out, depth, level + 1);
-    } else if (name.endsWith(".md")) {
-      out.push(full.replace(/\\/g, "/"));
-    }
-  }
-  return out;
-}
-
-// Expand every rule in sources.mjs into concrete file entries, minus anything a
-// curated manifest entry already covers (curated prose wins — it is better retrieval).
-function expandSources() {
-  const curatedPaths = new Set(manifest.map((e) => resolveSourcePath(e).replace(/\\/g, "/").toLowerCase()));
-  const entries = [];
-  const seen = new Set();
-
-  for (const rule of sources) {
-    let files = [];
-    if (rule.memoryScan) {
-      if (!existsSync(rule.memoryScan)) continue;
-      for (const proj of readdirSync(rule.memoryScan)) {
-        if (MEMORY_DIR_EXCLUDES.has(proj)) continue;
-        const memDir = join(rule.memoryScan, proj, "memory");
-        if (!existsSync(memDir)) continue;
-        for (const f of walkFiles(memDir, memDir, [], 1)) {
-          if (f.endsWith("/MEMORY.md")) continue; // the index, not a memory
-          files.push({ full: f, label: `${proj}/${f.split("/").pop()}` });
-        }
-      }
-    } else {
-      const root = rule.root.replace(/\\/g, "/");
-      files = walkFiles(root, root, [], rule.depth ?? Infinity)
-        .map((full) => ({ full, label: full.slice(root.length + 1) }))
-        // A rule's own excludes match the path relative to its root.
-        .filter(({ label }) => !(rule.exclude ?? []).some((re) => re.test(label)));
-    }
-
-    for (const { full, label } of files) {
-      if (curatedPaths.has(full.toLowerCase())) continue; // curated entry wins
-      const slug = rule.slugPrefix + slugify(label);
-      if (seen.has(slug)) continue;
-      seen.add(slug);
-      entries.push({
-        sourceSlug: slug,
-        path: full,
-        type: rule.type,
-        tags: rule.tags,
-        strategy: "file",
-        ruleId: rule.id,
-      });
-    }
-  }
-  return entries;
-}
-
-// Read a file-backed entry and turn it into one row per chunk. Chunks share a
-// sourceGroup so re-sync can delete the whole set even when the chunk count changes.
-function materialize(entry) {
-  if (entry.strategy !== "file") {
-    return [{ ...entry, sourceGroup: entry.sourceSlug, content: entry.content, chunk: 1, chunks: 1 }];
-  }
-  const raw = readFileSync(entry.path, "utf8");
-  const rel = entry.path.split("/").slice(-2).join("/");
-  const parts = chunkText(raw);
-  return parts.map((text, i) => ({
-    ...entry,
-    sourceGroup: entry.sourceSlug,
-    sourceSlug: parts.length === 1 ? entry.sourceSlug : `${entry.sourceSlug}#${i + 1}`,
-    chunk: i + 1,
-    chunks: parts.length,
-    // A header so a retrieved chunk can say what it is and where it came from —
-    // without it, chunk 7 of a research doc arrives as context-free prose.
-    content:
-      parts.length === 1
-        ? `Source: ${rel}\n\n${text}`
-        : `Source: ${rel} (part ${i + 1} of ${parts.length})\n\n${text}`,
-  }));
-}
-
-function contentHash(text) {
-  return createHash("sha256").update(text).digest("hex").slice(0, 16);
-}
-
-function isDigestStale(entry) {
-  const mtime = sourceMtime(entry);
-  const authored = digestedAtInstant(entry);
-  if (!mtime || !authored) return null; // unknowable, not false
-  return mtime > authored;
-}
-
-// A digest older than its source is a claim the source has since moved past, so serve
-// the source itself until someone re-authors the digest. --verify reported this drift
-// for months and nothing acted on it: 12 of 74 digests had drifted again by 2026-11-07,
-// the strategy digest among them, 75 days behind. Bumping digestedAt restores the digest.
-function withDigestFallback(entry) {
-  if (!isDigestStale(entry)) return entry;
-  const path = resolveSourcePath(entry).replace(/\\/g, "/");
-  try {
-    if (!statSync(path).isFile()) return entry;
-  } catch {
-    return entry;
-  }
-  return { ...entry, path, strategy: "file", digestSuperseded: true };
-}
 
 function loadEnv() {
   const envPath = join(REPO_ROOT, ".env");
@@ -392,9 +166,6 @@ async function patchEmbedding(id, embedding, env) {
   }
 }
 
-function curatedEntries() {
-  return manifest.map((e) => withDigestFallback({ ...e, ruleId: "curated" }));
-}
 
 function selectEntries() {
   // Curated digests first, then everything the sources.mjs rules expand to.
@@ -416,7 +187,7 @@ function selectEntries() {
 // Without this the daily task re-embeds every row every night — tolerable at 74
 // entries, wasteful at 250+.
 async function fetchIndexState(env) {
-  const state = new Map(); // sourceGroup -> { hash, seen, ok }
+  const state = new Map(); // sourceGroup -> { hash, seen, ok, rule, file }
 
   // PostgREST caps rows per response (the project's max-rows setting, 1000 by default),
   // and it does so SILENTLY — a plain `limit=5000` returns 1000 rows and no warning.
@@ -445,7 +216,7 @@ async function fetchIndexState(env) {
       if (!group) continue;
       const prev = state.get(group);
       // Only treat a group as unchanged if every one of its chunks carries the same hash.
-      if (!prev) state.set(group, { hash: m.contentHash, seen: 1, ok: true });
+      if (!prev) state.set(group, { hash: m.contentHash, seen: 1, ok: true, rule: m.rule, file: m.sourceFile });
       else {
         prev.seen++;
         if (prev.hash !== m.contentHash) prev.ok = false;
@@ -454,6 +225,52 @@ async function fetchIndexState(env) {
     if (rows.length < PAGE) break;
   }
   return state;
+}
+
+// Remove rows whose source is no longer in scope: a deleted or renamed file, a dropped
+// manifest entry, a new exclude, or a folder that graduated to its own repo. Until
+// 2026-11-10 the sync never did this, so every one of those left a stale copy in search
+// until someone deleted it by hand.
+//
+// Two guards, because a wrong delete loses rows that only a full re-embed restores:
+//   1. A rule whose root folder is missing (a repo moved, a drive not mounted) keeps its
+//      rows. Its files vanished from the scan, but they were not taken out of scope.
+//   2. More than MAX_PRUNE orphaned sources at once prunes nothing. That many at once
+//      looks like a mistake, not housekeeping; prune it by hand after looking.
+const MAX_PRUNE = 50;
+
+async function pruneOrphans(indexState, entries, env) {
+  const inScope = new Set(entries.map((e) => e.sourceSlug));
+  const roots = new Map(sources.map((r) => [r.id, r.root ?? r.memoryScan]));
+  const orphans = [];
+  for (const [group, info] of indexState) {
+    if (inScope.has(group)) continue;
+    const root = roots.get(info.rule);
+    if (root && !existsSync(root)) {
+      console.log(`  [kept] ${group} — its rule's root ${root} is missing, so it was not pruned`);
+      continue;
+    }
+    orphans.push([group, info]);
+  }
+  if (orphans.length > MAX_PRUNE) {
+    console.log(
+      `
+${orphans.length} orphaned sources found, over the limit of ${MAX_PRUNE}: none pruned. ` +
+        `Run --verify to see them.`
+    );
+    return 0;
+  }
+  let pruned = 0;
+  for (const [group, info] of orphans) {
+    try {
+      await deleteByGroup(group, env);
+      console.log(`  [pruned] ${group} (${info.seen} row(s)) — ${info.file ?? "no source file recorded"}`);
+      pruned++;
+    } catch (err) {
+      console.error(`  [FAILED] prune ${group}: ${err.message}`);
+    }
+  }
+  return pruned;
 }
 
 async function runSync() {
@@ -511,6 +328,13 @@ async function runSync() {
     `\nbrain-sync summary: ${ok} ok, ${failed} failed, ${skipped} unchanged (skipped), ` +
       `${entries.length} total — ${rows} row(s) written.`
   );
+  // Only a full run knows the whole scope; a --rule or --slug run would see everything
+  // else as orphaned.
+  const fullRun = !flags.slug && !flags.rule && !flags.batch && !flags.curatedOnly;
+  if (fullRun && !flags.dryRun && indexState.size > 0) {
+    const pruned = await pruneOrphans(indexState, entries, env);
+    if (pruned > 0) console.log(`${pruned} orphaned source(s) removed.`);
+  }
   const superseded = entries.filter((e) => e.digestSuperseded).length;
   if (superseded > 0) console.log(`${superseded} drifted digest(s) served from their source file.`);
   if (failed > 0) process.exitCode = 1;
@@ -598,7 +422,7 @@ async function checkDatabaseParity() {
     console.log("Differences mean the next sync has work to do, or a row was edited outside the sync.");
   }
   if (orphanGroups.size) {
-    console.log("Orphans are rows whose source is no longer in scope. The sync never removes them.");
+    console.log("Orphans are rows whose source is no longer in scope. A full sync removes them (up to 50 at once).");
   }
 }
 
