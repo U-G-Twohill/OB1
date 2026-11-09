@@ -241,7 +241,7 @@ grep -rlEi 'INSERT INTO|customer_email|buyer_email|attendee|ticket_holder' <root
 | Non-markdown (`.html` vision docs, proposals, PDFs, images) | The sync only reads `.md`. Several HTML docs have markdown twins that *are* indexed | No — would need a converter |
 | Vendored and generated trees | `GLOBAL_EXCLUDES` — not authored content | Yes |
 
-**To extend:** add a rule to `sources.mjs`. No manifest entries, no `BATCH_PREFIX` edit, no digest to write — a rule is a root, a slug prefix and some tags. Run the privacy scan above first, and check the root's *real* file count after excludes before trusting its size.
+**To extend:** add a rule to `sources.mjs`. No manifest entries, no `BATCH_PREFIX` edit, no digest to write — a rule is a root, a slug prefix and some tags. Run the privacy scan above first, and check the root's *real* file count after excludes before trusting its size. A repo rule can also take `exclude` (regexes matched against the path relative to its root) for anything that is that repo's own noise; Folio uses it for `context/`, which holds unfilled GlensToolkit templates identical to ones already indexed. Test `fixtures/` folders are excluded globally, because fixtures are invented documents written to look real.
 
 ---
 

@@ -55,6 +55,9 @@ export const GLOBAL_EXCLUDES = [
   /[\\/]worktrees[\\/]/,
   /[\\/]\.next[\\/]/,
   /[\\/]vendor[\\/]/,
+  // Test fixtures. Folio's are fake plans written to look like the real corpus (one is a
+  // generated 155 KB "Plan 0003"), so indexing them would surface invented plans in search.
+  /[\\/]fixtures[\\/]/,
 ];
 
 // Claude Code memory directories that must NOT be indexed, by project-dir name.
@@ -157,6 +160,12 @@ export const sources = [
   // the playbook's rule holding: describe the process, never the data.
   //
   // If a repo ever starts holding real customer records in markdown, remove it here.
+  //
+  // icu-relay, Folio and icu-platform were added 2026-11-09 after the same scan: no keys,
+  // tokens, email addresses or phone numbers; icu-platform's 66 "customer" hits all describe
+  // its schema and erasure behaviour, not data. icu-relay is private (it describes how the
+  // bot runs code on the desktop), which the brain is too; it holds no credentials.
+  // Not added: image-visualizer (386 files would swamp search) and relay-sandbox (a test copy).
   ...[
     { key: "psc", dir: "D:/Websites/Public Service Center", tags: ["psc", "client", "ticketing"] },
     { key: "bens-trees", dir: "D:/Websites/Ben's Trees", tags: ["bens-trees", "client"] },
@@ -170,10 +179,16 @@ export const sources = [
     { key: "vps-infra", dir: "D:/Repos/vps-infra", tags: ["vps-infra", "hosting"] },
     { key: "permissible-lab", dir: "D:/Repos/permissible-lab", tags: ["permissible-lab", "audio", "dsp"] },
     { key: "drumgen", dir: "D:/Repos/DrumGen", tags: ["drumgen", "audio", "midi"] },
+    { key: "icu-relay", dir: "D:/Repos/icu-relay", tags: ["icu-relay", "telegram", "remote-control"] },
+    // Folio's context/ files are unfilled GlensToolkit templates, byte-identical to the
+    // toolkit's own, which are already indexed under repo-glenstoolkit.
+    { key: "folio", dir: "D:/Repos/Folio", tags: ["folio", "markdown-reader", "electron"], exclude: [/^context\//] },
+    { key: "icu-platform", dir: "D:/Repos/icu-platform", tags: ["icu-platform", "chassis", "modules"] },
   ].map((r) => ({
     id: `repo-${r.key}`,
     label: `Repo — ${r.dir.split("/").pop()}`,
     root: r.dir,
+    exclude: r.exclude,
     slugPrefix: `r-${r.key}-`,
     type: "reference",
     tags: ["repo-content", ...r.tags],

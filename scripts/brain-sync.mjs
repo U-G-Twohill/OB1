@@ -184,10 +184,10 @@ function expandSources() {
       }
     } else {
       const root = rule.root.replace(/\\/g, "/");
-      files = walkFiles(root, root, [], rule.depth ?? Infinity).map((full) => ({
-        full,
-        label: full.slice(root.length + 1),
-      }));
+      files = walkFiles(root, root, [], rule.depth ?? Infinity)
+        .map((full) => ({ full, label: full.slice(root.length + 1) }))
+        // A rule's own excludes match the path relative to its root.
+        .filter(({ label }) => !(rule.exclude ?? []).some((re) => re.test(label)));
     }
 
     for (const { full, label } of files) {
