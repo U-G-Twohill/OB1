@@ -61,7 +61,7 @@ verbatim, so indexing it made every question match this file.
 | --- | --- | --- |
 | 16 | When did Public Service Center open and go live? | `r-psc-docs-state` / `r-psc-claude` / `memory-project-public-service-centre` / `memory-project-psc-ticketing-stack` / `cc-context-current-data` / `cc-context-strategy` / `cc-status-current` / `mem-d-websites-public-service-center-psc-site-live-door-only` / `r-psc-context-business-info` |
 | 17 | Is PSC selling tickets through EzeTix or its own engine right now? | `r-psc-docs-state` / `r-psc-claude` / `r-psc-docs-launch-decision-card` / `memory-project-psc-ticketing-stack` / `memory-project-public-service-centre` |
-| 18 | What is the next piece of work on PSC? | `r-psc-plans-2026-11-03-after-ticketing-goes-live` / `r-psc-docs-state` / `r-psc-claude` / `memory-project-psc-ticketing-stack` / `memory-project-public-service-centre` |
+| 18 | What stage is PSC at now, and what work is left? | `r-psc-plans-2026-11-03-after-ticketing-goes-live` / `r-psc-docs-state` / `r-psc-claude` / `memory-project-psc-ticketing-stack` / `memory-project-public-service-centre` |
 | 19 | What is Tweaker and how is it installed? | `r-tweaker-readme` / `r-tweaker-claude` / `r-tweaker-docs-state` / `cc-decision-adr-0008` / `cc-context-system-map` |
 | 20 | What is icu-relay for? | `r-icu-relay-claude` / `r-icu-relay-docs-state` / `r-icu-relay-decisions-0001-dedicated-repo-and-cli-subprocess` / `cc-context-system-map` |
 | 21 | What does the Folio app do? | `r-folio-readme` / `r-folio-docs-state` / `r-folio-claude` |

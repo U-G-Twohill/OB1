@@ -320,11 +320,14 @@ which still said PSC was "chasing production cut-over gates". Uriah approved del
 outranks the git copy of the same facts, delete it rather than work around it. The same day,
 #13 and #16 were found answered in the top 3 by files missing from their expected lists (ADR
 0004 and the icu-tools README, after icu-tools' digest drifted; PSC's `context/business-info.md`),
-so both lists gained them. Result: **31 of 32**.
+so both lists gained them.
 
-**Still failing, content rather than search:** "what is the next piece of work on PSC?" finds its
-answers at #5–#8 behind broader PSC memories. Fixing it would mean editing the PSC repo's docs,
-which belong to that repo's own sessions.
+#18 asked "what is the next piece of work on PSC?" and found its answers at #5–#8. Its premise
+had gone stale: PSC opened in late October and, as of 2026-11-11, is in aftercare with no active
+build (Uriah). The question now asks what stage PSC is at and what work is left, and the two PSC
+memories (and their digests) record the aftercare phase. Result: **32 of 32**. When a golden
+question's premise stops being true, reword it to what someone would ask now; don't keep a
+question whose honest answer no longer exists.
 
 **The deployed function's source is in git, force-added.** `supabase/` is gitignored upstream,
 so `supabase/functions/open-brain-mcp/index.ts` and `deno.json` were added with `git add -f`
