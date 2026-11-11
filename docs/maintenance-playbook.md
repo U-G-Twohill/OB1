@@ -314,14 +314,24 @@ docs/sql/2026-11-10-hybrid-search.sql`, then `npx supabase@2 functions deploy op
 --project-ref <ref> --use-api`. Both need `npx supabase@2 login` in an interactive terminal
 first (it cannot log in from inside Claude Code). The ref is the subdomain of `SUPABASE_URL`.
 
-**The two still failing**, both content rather than search: "when did PSC open?" is outranked by
-the 2026-07-02 hand-captured "setup complete" note, which still says PSC is "chasing production
-cut-over gates"; and "what is the next piece of work on PSC?" finds its answers at #5–#8 behind
-broader PSC memories.
+**"When did PSC open?"** was outranked by the 2026-07-02 hand-captured "setup complete" note,
+which still said PSC was "chasing production cut-over gates". Uriah approved deleting it on
+2026-11-11. A hand-captured note has no source file, so nothing ever corrects it: when one
+outranks the git copy of the same facts, delete it rather than work around it. The same day,
+#13 and #16 were found answered in the top 3 by files missing from their expected lists (ADR
+0004 and the icu-tools README, after icu-tools' digest drifted; PSC's `context/business-info.md`),
+so both lists gained them. Result: **31 of 32**.
 
-**The deployed function's source is not in git.** `supabase/` is gitignored upstream, so
-`supabase/functions/open-brain-mcp/index.ts` exists only on this desktop. Back it up before
-replacing it from a fresh upstream clone.
+**Still failing, content rather than search:** "what is the next piece of work on PSC?" finds its
+answers at #5–#8 behind broader PSC memories. Fixing it would mean editing the PSC repo's docs,
+which belong to that repo's own sessions.
+
+**The deployed function's source is in git, force-added.** `supabase/` is gitignored upstream,
+so `supabase/functions/open-brain-mcp/index.ts` and `deno.json` were added with `git add -f`
+on 2026-11-11 (the rest of `supabase/`, including `config.toml`, stays ignored). Git tracks them
+from then on, so edits show in `git status` as usual. The file reads every secret from
+`Deno.env`; keep it that way. Deploy from the committed file, and commit before or with each
+deploy, so git always holds what is live.
 
 ## Troubleshooting
 

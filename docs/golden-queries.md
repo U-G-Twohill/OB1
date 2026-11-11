@@ -16,7 +16,7 @@
 | 10 | What went wrong with the deep-research workflow on 2026-07-02? | `memory-feedback-usage-budget-no-fanout` | ⚠️ MISS on first phrasing (top-5 didn't surface it, all ~42-44%) — **retried with vocabulary closer to the source** ("usage budget Fable fan-out burned session limits") → 65.3%, correct source. Content is fine; the abstract phrasing just doesn't share vocabulary with the digest. See note below. |
 | 11 | Why is Command Center a separate workspace from project-hub? | `cc-decision-adr-0001` / `memory-project-command-center-purpose` | ✅ PASS (71.0%) |
 | 12 | What's the Improvement Engagement pricing tier? | `memory-project-improvement-engagement-tier` | ✅ PASS (77.7%) |
-| 13 | What is icu-tools and what phase is it in? | `repo-icu-tools` / `memory-project-track-d-delivery-suite` | ✅ PASS (59.7%) |
+| 13 | What is icu-tools and what phase is it in? | `repo-icu-tools` / `memory-project-track-d-delivery-suite` / `r-icu-tools-readme` / `cc-decision-adr-0004` | ✅ PASS (59.7%) |
 | 14 | What's Cal.com used for and why was it chosen over Calendly? | `memory-reference-calcom-booking` | ✅ PASS (67.4%) |
 | 15 | What coordination-layer tooling gaps did the 2026-07-02 audit find? | `cc-plan-0011-coordination-tooling` (+2026-11-10: `cc-output-full-audit-2026-07-02`) | ✅ PASS (52.6%) |
 
@@ -59,7 +59,7 @@ verbatim, so indexing it made every question match this file.
 
 | # | Question | Expected source (sourceSlug) |
 | --- | --- | --- |
-| 16 | When did Public Service Center open and go live? | `r-psc-docs-state` / `r-psc-claude` / `memory-project-public-service-centre` / `memory-project-psc-ticketing-stack` / `cc-context-current-data` / `cc-context-strategy` / `cc-status-current` / `mem-d-websites-public-service-center-psc-site-live-door-only` |
+| 16 | When did Public Service Center open and go live? | `r-psc-docs-state` / `r-psc-claude` / `memory-project-public-service-centre` / `memory-project-psc-ticketing-stack` / `cc-context-current-data` / `cc-context-strategy` / `cc-status-current` / `mem-d-websites-public-service-center-psc-site-live-door-only` / `r-psc-context-business-info` |
 | 17 | Is PSC selling tickets through EzeTix or its own engine right now? | `r-psc-docs-state` / `r-psc-claude` / `r-psc-docs-launch-decision-card` / `memory-project-psc-ticketing-stack` / `memory-project-public-service-centre` |
 | 18 | What is the next piece of work on PSC? | `r-psc-plans-2026-11-03-after-ticketing-goes-live` / `r-psc-docs-state` / `r-psc-claude` / `memory-project-psc-ticketing-stack` / `memory-project-public-service-centre` |
 | 19 | What is Tweaker and how is it installed? | `r-tweaker-readme` / `r-tweaker-claude` / `r-tweaker-docs-state` / `cc-decision-adr-0008` / `cc-context-system-map` |
